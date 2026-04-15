@@ -1,0 +1,27 @@
+{
+  "object" : {
+    "artifacts" : [
+
+    ],
+    "dependencies" : [
+      {
+        "basedOn" : null,
+        "packageRef" : {
+          "identity" : "zkmetal",
+          "kind" : "fileSystem",
+          "location" : "/Users/carnation/Documents/Claude/zkMetal",
+          "name" : "zkMetal"
+        },
+        "state" : {
+          "name" : "fileSystem",
+          "path" : "/Users/carnation/Documents/Claude/zkMetal"
+        },
+        "subpath" : "zkmetal"
+      }
+    ],
+    "prebuilts" : [
+
+    ]
+  },
+  "version" : 7
+}

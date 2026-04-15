@@ -1,0 +1,12 @@
+{
+  "": {
+    "swift-dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetalPackageTests.build/master.swiftdeps"
+  },
+  "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetalPackageTests.derived/runner.swift": {
+    "dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetalPackageTests.build/runner.d",
+    "object": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetalPackageTests.build/runner.swift.o",
+    "swiftmodule": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetalPackageTests.build/runner~partial.swiftmodule",
+    "swift-dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetalPackageTests.build/runner.swiftdeps",
+    "diagnostics": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetalPackageTests.build/runner.dia"
+  }
+}

@@ -1,0 +1,131 @@
+{
+  "": {
+    "swift-dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/master.swiftdeps"
+  },
+  "/Users/carnation/Documents/Claude/EVMetal/Sources/EVMetal/AIR/EVMAIR.swift": {
+    "dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMAIR.d",
+    "object": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMAIR.swift.o",
+    "swiftmodule": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMAIR~partial.swiftmodule",
+    "swift-dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMAIR.swiftdeps",
+    "diagnostics": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMAIR.dia"
+  },
+  "/Users/carnation/Documents/Claude/EVMetal/Sources/EVMetal/AIR/EVMGPUConstraintEngine.swift": {
+    "dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMGPUConstraintEngine.d",
+    "object": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMGPUConstraintEngine.swift.o",
+    "swiftmodule": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMGPUConstraintEngine~partial.swiftmodule",
+    "swift-dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMGPUConstraintEngine.swiftdeps",
+    "diagnostics": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMGPUConstraintEngine.dia"
+  },
+  "/Users/carnation/Documents/Claude/EVMetal/Sources/EVMetal/EVM/EVMCircuit.swift": {
+    "dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMCircuit.d",
+    "object": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMCircuit.swift.o",
+    "swiftmodule": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMCircuit~partial.swiftmodule",
+    "swift-dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMCircuit.swiftdeps",
+    "diagnostics": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMCircuit.dia"
+  },
+  "/Users/carnation/Documents/Claude/EVMetal/Sources/EVMetal/EVM/EVMExecutionEngine.swift": {
+    "dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMExecutionEngine.d",
+    "object": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMExecutionEngine.swift.o",
+    "swiftmodule": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMExecutionEngine~partial.swiftmodule",
+    "swift-dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMExecutionEngine.swiftdeps",
+    "diagnostics": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMExecutionEngine.dia"
+  },
+  "/Users/carnation/Documents/Claude/EVMetal/Sources/EVMetal/EVM/EVMOpcodes.swift": {
+    "dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMOpcodes.d",
+    "object": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMOpcodes.swift.o",
+    "swiftmodule": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMOpcodes~partial.swiftmodule",
+    "swift-dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMOpcodes.swiftdeps",
+    "diagnostics": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMOpcodes.dia"
+  },
+  "/Users/carnation/Documents/Claude/EVMetal/Sources/EVMetal/EVM/EVMState.swift": {
+    "dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMState.d",
+    "object": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMState.swift.o",
+    "swiftmodule": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMState~partial.swiftmodule",
+    "swift-dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMState.swiftdeps",
+    "diagnostics": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMState.dia"
+  },
+  "/Users/carnation/Documents/Claude/EVMetal/Sources/EVMetal/EVM/EVMStorage.swift": {
+    "dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMStorage.d",
+    "object": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMStorage.swift.o",
+    "swiftmodule": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMStorage~partial.swiftmodule",
+    "swift-dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMStorage.swiftdeps",
+    "diagnostics": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMStorage.dia"
+  },
+  "/Users/carnation/Documents/Claude/EVMetal/Sources/EVMetal/EVM/EVMTrace.swift": {
+    "dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMTrace.d",
+    "object": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMTrace.swift.o",
+    "swiftmodule": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMTrace~partial.swiftmodule",
+    "swift-dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMTrace.swiftdeps",
+    "diagnostics": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMTrace.dia"
+  },
+  "/Users/carnation/Documents/Claude/EVMetal/Sources/EVMetal/EVM/EVMemory.swift": {
+    "dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMemory.d",
+    "object": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMemory.swift.o",
+    "swiftmodule": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMemory~partial.swiftmodule",
+    "swift-dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMemory.swiftdeps",
+    "diagnostics": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMemory.dia"
+  },
+  "/Users/carnation/Documents/Claude/EVMetal/Sources/EVMetal/Hash/M31Word.swift": {
+    "dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/M31Word.d",
+    "object": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/M31Word.swift.o",
+    "swiftmodule": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/M31Word~partial.swiftmodule",
+    "swift-dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/M31Word.swiftdeps",
+    "diagnostics": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/M31Word.dia"
+  },
+  "/Users/carnation/Documents/Claude/EVMetal/Sources/EVMetal/Precompiles/EVMPrecompiles.swift": {
+    "dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMPrecompiles.d",
+    "object": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMPrecompiles.swift.o",
+    "swiftmodule": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMPrecompiles~partial.swiftmodule",
+    "swift-dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMPrecompiles.swiftdeps",
+    "diagnostics": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMPrecompiles.dia"
+  },
+  "/Users/carnation/Documents/Claude/EVMetal/Sources/EVMetal/Prover/EVMBatchGPUProver.swift": {
+    "dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMBatchGPUProver.d",
+    "object": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMBatchGPUProver.swift.o",
+    "swiftmodule": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMBatchGPUProver~partial.swiftmodule",
+    "swift-dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMBatchGPUProver.swiftdeps",
+    "diagnostics": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMBatchGPUProver.dia"
+  },
+  "/Users/carnation/Documents/Claude/EVMetal/Sources/EVMetal/Prover/EVMBatchProver.swift": {
+    "dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMBatchProver.d",
+    "object": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMBatchProver.swift.o",
+    "swiftmodule": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMBatchProver~partial.swiftmodule",
+    "swift-dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMBatchProver.swiftdeps",
+    "diagnostics": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMBatchProver.dia"
+  },
+  "/Users/carnation/Documents/Claude/EVMetal/Sources/EVMetal/Prover/EVMGPUMerkleProver.swift": {
+    "dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMGPUMerkleProver.d",
+    "object": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMGPUMerkleProver.swift.o",
+    "swiftmodule": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMGPUMerkleProver~partial.swiftmodule",
+    "swift-dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMGPUMerkleProver.swiftdeps",
+    "diagnostics": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMGPUMerkleProver.dia"
+  },
+  "/Users/carnation/Documents/Claude/EVMetal/Sources/EVMetal/Prover/EVMHyperNovaAggregator.swift": {
+    "dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMHyperNovaAggregator.d",
+    "object": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMHyperNovaAggregator.swift.o",
+    "swiftmodule": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMHyperNovaAggregator~partial.swiftmodule",
+    "swift-dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMHyperNovaAggregator.swiftdeps",
+    "diagnostics": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMHyperNovaAggregator.dia"
+  },
+  "/Users/carnation/Documents/Claude/EVMetal/Sources/EVMetal/Prover/EVMetalCPUMerkleProver.swift": {
+    "dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMetalCPUMerkleProver.d",
+    "object": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMetalCPUMerkleProver.swift.o",
+    "swiftmodule": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMetalCPUMerkleProver~partial.swiftmodule",
+    "swift-dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMetalCPUMerkleProver.swiftdeps",
+    "diagnostics": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMetalCPUMerkleProver.dia"
+  },
+  "/Users/carnation/Documents/Claude/EVMetal/Sources/EVMetal/Prover/EVMetalGPUProver.swift": {
+    "dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMetalGPUProver.d",
+    "object": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMetalGPUProver.swift.o",
+    "swiftmodule": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMetalGPUProver~partial.swiftmodule",
+    "swift-dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMetalGPUProver.swiftdeps",
+    "diagnostics": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMetalGPUProver.dia"
+  },
+  "/Users/carnation/Documents/Claude/EVMetal/Sources/EVMetal/Prover/EVMetalLeafHashEngine.swift": {
+    "dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMetalLeafHashEngine.d",
+    "object": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMetalLeafHashEngine.swift.o",
+    "swiftmodule": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMetalLeafHashEngine~partial.swiftmodule",
+    "swift-dependencies": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMetalLeafHashEngine.swiftdeps",
+    "diagnostics": "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/EVMetal.build/EVMetalLeafHashEngine.dia"
+  }
+}
