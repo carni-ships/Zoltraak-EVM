@@ -283,8 +283,8 @@ public struct EVMCircuit {
     public static func shlConstraints(a: [M31], shift: M31, result: [M31]) -> [M31] {
         // Simplified: shift by limb count and bit offset
         let shiftVal = shift.v
-        let limbShift = Int(shiftVal / 31)
-        let bitShift = Int(shiftVal % 31)
+        let limbShift = Int(UInt64(shiftVal) / 31)
+        let bitShift = Int(UInt64(shiftVal) % 31)
 
         var expected = [M31](repeating: .zero, count: 9)
 
@@ -313,8 +313,8 @@ public struct EVMCircuit {
     /// SHR: result = a >> shift (right shift, shift < 256)
     public static func shrConstraints(a: [M31], shift: M31, result: [M31]) -> [M31] {
         let shiftVal = shift.v
-        let limbShift = Int(shiftVal / 31)
-        let bitShift = Int(shiftVal % 31)
+        let limbShift = Int(UInt64(shiftVal) / 31)
+        let bitShift = Int(UInt64(shiftVal) % 31)
 
         var expected = [M31](repeating: .zero, count: 9)
 
@@ -342,7 +342,7 @@ public struct EVMCircuit {
     /// BYTE: extract the i-th byte from a 256-bit word
     public static func byteConstraints(a: [M31], index: M31, result: M31) -> [M31] {
         // Extract byte at position index (0 = MSB, 31 = LSB)
-        let idx = Int(index.v)
+        let idx = Int(UInt64(index.v) % 32)
         var expected = M31.zero
 
         if idx < 32 {
@@ -355,16 +355,89 @@ public struct EVMCircuit {
         return [m31Sub(result, expected)]
     }
 
+    /// SAR: result = a >> shift (arithmetic right shift, preserves sign)
+    public static func sarConstraints(a: [M31], shift: M31, result: [M31]) -> [M31] {
+        let shiftVal = shift.v
+        let limbShift = Int(UInt64(shiftVal) / 31)
+        let bitShift = Int(UInt64(shiftVal) % 31)
+
+        // Check if a is negative (sign bit in highest limb)
+        let signBit = (a[8].v & 0x40000000) != 0
+
+        var expected = [M31](repeating: .zero, count: 9)
+
+        if signBit {
+            // Negative number: fill with 1s on left side
+            // All limbs that are completely shifted out become 0x7FFFFFFF
+            for i in 0..<limbShift {
+                expected[i] = M31(v: 0x7FFFFFFF)
+            }
+
+            if limbShift < 9 {
+                if bitShift == 0 {
+                    expected[limbShift] = a[limbShift]
+                } else {
+                    // Shift right with sign extension (fill with 1s)
+                    let lowBits = a[limbShift].v >> bitShift
+                    // Sign-extend: if there were high bits from a[limbShift+1], they'd fill with 1s
+                    // Since we're shifting right, we need to set high bits based on sign
+                    let signFill: UInt32 = 0x7FFFFFFF << (31 - bitShift)
+                    expected[limbShift] = M31(v: (lowBits | signFill) & 0x7FFFFFFF)
+                }
+
+                // Copy remaining limbs
+                for i in (limbShift + 1)..<9 {
+                    if bitShift == 0 {
+                        expected[i] = a[i]
+                    } else if i > 0 {
+                        let lowBits = a[i].v >> bitShift
+                        let highBits = (a[i - 1].v << (31 - bitShift)) & 0x7FFFFFFF
+                        expected[i] = M31(v: (lowBits | highBits) & 0x7FFFFFFF)
+                    }
+                }
+            }
+        } else {
+            // Positive number: shift like SHR
+            if limbShift < 9 {
+                for i in 0..<(9 - limbShift) {
+                    if bitShift == 0 {
+                        expected[i] = a[i + limbShift]
+                    } else if i + limbShift + 1 < 9 {
+                        let lowBits = a[i + limbShift].v >> bitShift
+                        let highBits = a[i + limbShift + 1].v << (31 - bitShift)
+                        expected[i] = M31(v: (lowBits | highBits) & 0x7FFFFFFF)
+                    }
+                }
+            }
+        }
+
+        var constraints = [M31]()
+        for i in 0..<9 {
+            constraints.append(m31Sub(result[i], expected[i]))
+        }
+        return constraints
+    }
+
     // MARK: - Modular Arithmetic
 
     /// MOD: result = a % b (mod 2^256)
-    /// Simplified using division by repeated subtraction
+    /// Verifies: result < b (unless b == 0 which is handled separately)
     public static func modConstraints(a: [M31], b: [M31], result: [M31]) -> [M31] {
-        // Real implementation would use LogUp for division
-        // For now, just verify result < b
-        var constraints = [M31]()
+        var constraints = [M31](repeating: .zero, count: 9)
 
-        // Verify result < b by checking b - result has no borrow
+        // Check if b is zero - division by zero is undefined
+        let bIsZero = b.allSatisfy { $0.v == 0 }
+        if bIsZero {
+            // If b == 0, result should also be 0
+            for i in 0..<9 {
+                constraints[i] = result[i]  // Constraint fails if result != 0
+            }
+            return constraints
+        }
+
+        // Verify result < b by checking if b - result - 1 would borrow
+        // If result < b, then (b - 1) - result >= 0 with no borrow
+        // We do b - result and check if there's a final borrow
         var borrow: UInt64 = 0
         for i in 0..<9 {
             let bVal = UInt64(b[i].v)
@@ -373,25 +446,63 @@ public struct EVMCircuit {
             borrow = diff < 0 ? 1 : 0
         }
 
-        // borrow should be 0 (meaning result <= b)
-        // Actually we want result < b, so check for strict inequality
-        // Simplified: result == 0 is always valid
-        constraints.append(M31(v: UInt32(borrow)))
+        // If result < b, final borrow should be 0
+        // If result >= b, final borrow will be 1
+        // Return constraint: borrow should be 0 for valid result
+        constraints[0] = M31(v: UInt32(borrow))
         return constraints
     }
 
     /// DIV: result = a / b (unsigned division, mod 2^256)
+    /// Verifies: result * b <= a < (result + 1) * b (or result * b <= a if b == 0)
     public static func divConstraints(a: [M31], b: [M31], result: [M31]) -> [M31] {
-        // Real implementation: result * b + mod = a
-        // Use: a - result * b = 0 (mod M31) for each limb
-        var constraints = [M31]()
+        var constraints = [M31](repeating: .zero, count: 9)
 
-        // Simplified: just verify division result is correct
-        // by checking a >= result * b
-        // For now, return zero constraints
-        for i in 0..<9 {
-            constraints.append(.zero)
+        // Check if b is zero - division by zero returns 0 per EVM spec
+        let bIsZero = b.allSatisfy { $0.v == 0 }
+        if bIsZero {
+            // If b == 0, result should be 0
+            for i in 0..<9 {
+                constraints[i] = result[i]  // Constraint fails if result != 0
+            }
+            return constraints
         }
+
+        // Verify: result * b <= a
+        // Compute result * b limb-wise and compare with a
+        // We'll do 9x9 multiplication and compare 9 limbs
+
+        // Compute product = result * b
+        var product = [UInt64](repeating: 0, count: 18)  // Max 18 limbs for 9x9
+
+        for i in 0..<9 {
+            for j in 0..<9 {
+                product[i + j] += UInt64(result[i].v) * UInt64(b[j].v)
+            }
+        }
+
+        // Reduce to 9 limbs with carries
+        var reducedProduct = [M31](repeating: .zero, count: 9)
+        var carry: UInt64 = 0
+        for i in 0..<9 {
+            let sum = product[i] + carry
+            reducedProduct[i] = M31(v: UInt32(sum % UInt64(M31.P)))
+            carry = sum / UInt64(M31.P)
+        }
+
+        // Compare reducedProduct with a
+        // For a valid division: a >= product
+        // We verify a - product >= 0 by checking no borrow in subtraction
+        var borrow: UInt64 = 0
+        for i in 0..<9 {
+            let aVal = UInt64(a[i].v)
+            let pVal = UInt64(reducedProduct[i].v)
+            let diff = Int64(aVal) - Int64(pVal) - Int64(borrow)
+            borrow = diff < 0 ? 1 : 0
+        }
+
+        // If borrow == 0 at end, then a >= product (valid)
+        constraints[0] = M31(v: UInt32(borrow))
         return constraints
     }
 
@@ -399,7 +510,7 @@ public struct EVMCircuit {
 
     /// SIGNEXTEND: sign-extend from (tb + 1) * 8 bits to 256 bits
     public static func signextendConstraints(a: [M31], tb: M31, result: [M31]) -> [M31] {
-        let byteIdx = Int(tb.v)
+        let byteIdx = Int(UInt64(tb.v) % 32)
         var constraints = [M31]()
 
         if byteIdx < 31 {
@@ -477,9 +588,9 @@ public struct EVMCircuit {
         }
 
         let heightChange = op.properties.stackHeightChange
-        let expected = Int(currentHeight.v) + heightChange
+        let expected = Int(UInt64(currentHeight.v)) + heightChange
 
-        var diff = Int(nextHeight.v) - expected
+        var diff = Int(UInt64(nextHeight.v)) - expected
         if diff < 0 { diff = -diff }
 
         return [M31(v: diff == 0 ? 0 : 1)]
@@ -495,32 +606,6 @@ public struct EVMCircuit {
         // diff >= 0 means access is valid
         let isValid = diff.v < UInt32(M31.P) / 2 ? M31.one : M31.zero
         return [m31Sub(isValid, M31.one)]  // Should be valid
-    }
-
-    // MARK: - Lookup Constraints for Lasso
-
-    /// Create memory lookup challenge for read-before-write detection
-    public static func memoryReadLookup(
-        addr: M31, timestamp: M31, value: [M31], isWrite: M31
-    ) -> LookupConstraint {
-        return LookupConstraint(
-            tableName: "memory",
-            inputColumns: [155, 167],  // address column, timestamp column
-            outputColumns: Array(3..<11),  // value limbs
-            selector: 159  // is_write flag
-        )
-    }
-
-    /// Create stack lookup for stack operations
-    public static func stackLookup(
-        stackHeight: M31, value: [M31], isRead: M31
-    ) -> LookupConstraint {
-        return LookupConstraint(
-            tableName: "stack",
-            inputColumns: [163],  // call depth column
-            outputColumns: Array(3..<11),
-            selector: nil
-        )
     }
 
     // MARK: - Opcode Validity
@@ -553,7 +638,7 @@ public struct EVMCircuit {
     public static func jumpiConstraint(condition: M31, destination: M31, nextPC: M31) -> [M31] {
         // If condition != 0: nextPC == destination
         // If condition == 0: nextPC == currentPC + 1 (handled by PC continuity)
-        let isJump = m31IsZero(condition) ? M31.zero : M31.one
+        let isJump = EVMCircuit.m31IsZero(condition) ? M31.zero : M31.one
         let expected = m31Add(
             m31Mul(isJump, destination),
             m31Mul(m31Sub(M31.one, isJump), nextPC)

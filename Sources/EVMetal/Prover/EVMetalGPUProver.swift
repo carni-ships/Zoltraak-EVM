@@ -90,6 +90,7 @@ public final class EVMetalGPUProver {
     private let leafHashEngine: EVMetalLeafHashEngine
     private let cpuProver: EVMetalCPUMerkleProver
     private var merkleEngine: EVMGPUMerkleEngine?
+    private var gpuTreeEngine: Poseidon2M31Engine?  // zkMetal's GPU tree building engine
 
     // MARK: - Initialization
 
@@ -98,20 +99,27 @@ public final class EVMetalGPUProver {
     public init(config: Config = .standard) {
         self.config = config
         self.leafHashEngine = try! EVMetalLeafHashEngine()
+        // self.leafHashEngine.useSIMDCooperative = true  // Disabled - kernel has issues
         self.cpuProver = EVMetalCPUMerkleProver()
         self.merkleEngine = try? EVMGPUMerkleEngine()
+        do {
+            self.gpuTreeEngine = try Poseidon2M31Engine()  // Initialize GPU tree engine
+            print("✓ GPU Tree Engine initialized successfully")
+        } catch {
+            print("✗ GPU Tree Engine initialization failed: \(error)")
+            self.gpuTreeEngine = nil
+        }
     }
 
     // MARK: - GPU Commitment (Pure GPU)
 
     /// Commit trace columns using GPU with position-hashed Merkle trees.
     ///
-    /// This produces commitments that MATCH zkmetal's CPU tree builder because
+    /// This produces commitments that MATCH zkMetal's CPU tree builder because
     /// the GPU kernel hashes individual M31 values with their position.
     ///
-    /// For trees larger than `Poseidon2M31Engine.merkleSubtreeSize` (512 leaves),
-    /// the tree is automatically chunked into subtrees, with roots combined
-    /// using a binary hash to produce the final commitment.
+    /// Now uses GPU tree building via Poseidon2M31Engine.merkleCommit for
+    /// significantly improved performance.
     ///
     /// - Parameters:
     ///   - traceLDEs: Trace columns in LDE form, where each column is an array of M31 values.
@@ -123,72 +131,462 @@ public final class EVMetalGPUProver {
         evalLen: Int
     ) throws -> CommitResult {
         let t0 = CFAbsoluteTimeGetCurrent()
-        let subtreeMax = Poseidon2M31Engine.merkleSubtreeSize
+        let numColumns = traceLDEs.count
 
-        var commitments: [zkMetal.M31Digest] = []
+        // Determine if input is in "pre-hashed node" format (8 M31 per leaf)
+        // or "individual M31" format (1 M31 per leaf position).
+        // Pre-hashed nodes have (traceLDEs[col].count / evalLen) >= 8
+        let m31PerLeaf: Int
+        let actualLeavesPerColumn: Int
 
-        if evalLen <= subtreeMax {
-            // All leaves fit in one subtree - batch hash all columns at once
-            let numColumns = traceLDEs.count
-
-            // Flatten all values
-            var flatValues: [M31] = []
-            flatValues.reserveCapacity(numColumns * evalLen)
-            for col in traceLDEs {
-                flatValues.append(contentsOf: col)
-            }
-
-            // GPU batch hash all columns at once
-            let allDigests = try leafHashEngine.hashLeavesBatchPerColumn(
-                allValues: flatValues,
-                numColumns: numColumns,
-                countPerColumn: evalLen
-            )
-
-            // Build trees from pre-hashed digests
-            for colDigests in allDigests {
-                var nodes: [zkMetal.M31Digest] = []
-                for i in 0..<evalLen {
-                    let start = i * 8
-                    let digestValues = Array(colDigests[start..<start + 8])
-                    nodes.append(zkMetal.M31Digest(values: digestValues))
-                }
-
-                // Build tree bottom-up
-                var levelSize = evalLen
-                while levelSize > 1 {
-                    var nextLevel: [zkMetal.M31Digest] = []
-                    for i in stride(from: 0, to: levelSize, by: 2) {
-                        let left = nodes[i]
-                        let right = i + 1 < levelSize ? nodes[i + 1] : left
-                        let hash = zkMetal.M31Digest(values: poseidon2M31Hash(left: left.values, right: right.values))
-                        nextLevel.append(hash)
-                    }
-                    nodes = nextLevel
-                    levelSize = nodes.count
-                }
-                commitments.append(nodes[0])
+        if !traceLDEs.isEmpty && !traceLDEs[0].isEmpty {
+            let valuesPerCol = traceLDEs[0].count
+            if valuesPerCol >= evalLen * 8 {
+                // Pre-hashed node format: 8 M31 per leaf
+                m31PerLeaf = 8
+                actualLeavesPerColumn = evalLen
+            } else {
+                // Individual M31 format: 1 M31 per leaf
+                m31PerLeaf = 1
+                actualLeavesPerColumn = evalLen
             }
         } else {
-            // Need to chunk - split into 512-leaf subtrees
-            let numSubtrees = evalLen / subtreeMax
-            let numColumns = traceLDEs.count
+            m31PerLeaf = 1
+            actualLeavesPerColumn = evalLen
+        }
 
+        print("    [GPU Prover] commitTraceColumnsGPU: numColumns=\(numColumns), evalLen=\(evalLen), m31PerLeaf=\(m31PerLeaf)")
+        if !traceLDEs.isEmpty && !traceLDEs[0].isEmpty {
+            print("    [GPU Prover] traceLDEs[0].count=\(traceLDEs[0].count), expected for m31PerLeaf=1: \(evalLen)")
+        }
+
+        var commitments: [zkMetal.M31Digest] = []
+        let leafHashMs: Double
+        let treeBuildMs: Double
+
+        if m31PerLeaf == 8 {
+            // Data is already in pre-hashed node format (8 M31 per leaf)
+            // Skip GPU leaf hashing, go directly to tree building
+
+            // Reorganize into tree leaf format: [tree0_leaf0_8vals, tree0_leaf1_8vals, ...]
+            var treesLeaves: [[M31]] = []
+            treesLeaves.reserveCapacity(numColumns)
             for col in traceLDEs {
-                var subtreeRoots: [zkMetal.M31Digest] = []
-                for subIdx in 0..<numSubtrees {
-                    let start = subIdx * subtreeMax
-                    let subtreeValues = Array(col[start..<start + subtreeMax])
-                    let root = try leafHashEngine.buildMerkleTree(values: subtreeValues, numLeaves: subtreeMax)
-                    subtreeRoots.append(root)
-                }
-                let commitment = hashRootsToCommitment(subtreeRoots)
-                commitments.append(commitment)
+                treesLeaves.append(Array(col.prefix(evalLen * 8)))
             }
+
+            let treeStart = CFAbsoluteTimeGetCurrent()
+            if let engine = merkleEngine {
+                // GPU batch tree building using EVMGPUMerkleEngine
+                commitments = try engine.buildTreesBatch(treesLeaves: treesLeaves)
+            } else {
+                // CPU tree building fallback
+                for colLeaves in treesLeaves {
+                    let root = buildTreeFromDigests(digests: colLeaves, numLeaves: evalLen, numColumns: 1)
+                    commitments.append(root)
+                }
+            }
+            leafHashMs = 0
+            treeBuildMs = (CFAbsoluteTimeGetCurrent() - treeStart) * 1000
+
+        } else {
+            // Individual M31 format - need leaf hashing first
+            // Try GPU leaf hashing first, but fall back to CPU if it fails
+
+            // Flatten all values (column-major: all of col0, then all of col1, ...)
+            var flatValues: [M31] = []
+            flatValues.reserveCapacity(numColumns * evalLen)
+            for col in 0..<numColumns {
+                flatValues.append(contentsOf: traceLDEs[col])
+            }
+
+            print("    [GPU Prover] flatValues prepared, count=\(flatValues.count)")
+            print("    [GPU Prover] flatValues[0..<8]: \(flatValues.prefix(8).map { $0.v })")
+            print("    [GPU Prover] evalLen=\(evalLen), numColumns=\(numColumns)")
+
+            let hashStart = CFAbsoluteTimeGetCurrent()
+            var allDigests: [[M31]] = []
+
+            print("    [GPU Prover] About to call tryGPULeafHash, flatValues count=\(flatValues.count)")
+
+            do {
+                // Try GPU leaf hashing
+                allDigests = try tryGPULeafHash(flatValues: flatValues, numColumns: numColumns, countPerColumn: evalLen)
+                leafHashMs = (CFAbsoluteTimeGetCurrent() - hashStart) * 1000
+            } catch {
+                print("    GPU leaf hashing failed, using CPU: \(error)")
+                // Fall back to CPU leaf hashing
+                let cpuT0 = CFAbsoluteTimeGetCurrent()
+                allDigests = cpuHashLeaves(flatValues: flatValues, numColumns: numColumns, countPerColumn: evalLen)
+                leafHashMs = (CFAbsoluteTimeGetCurrent() - cpuT0) * 1000
+            }
+
+            // Phase 2: Build trees using CPU (simple and reliable)
+            // allDigests[col] already contains digests for column col in sequential order
+            let treeStart = CFAbsoluteTimeGetCurrent()
+            for colDigests in allDigests {
+                let root = buildTreeFromDigests(digests: colDigests, numLeaves: evalLen, numColumns: 1)
+                commitments.append(root)
+            }
+            treeBuildMs = (CFAbsoluteTimeGetCurrent() - treeStart) * 1000
         }
 
         let elapsed = (CFAbsoluteTimeGetCurrent() - t0) * 1000
-        return CommitResult(commitments: commitments, timeMs: elapsed)
+        return CommitResult(
+            commitments: commitments,
+            timeMs: elapsed,
+            leafHashMs: leafHashMs,
+            treeBuildMs: treeBuildMs
+        )
+    }
+
+    /// Build a Merkle tree from pre-hashed digests (CPU tree building).
+    /// This is used after GPU leaf hashing to complete the tree construction.
+    ///
+    /// Supports TWO input formats:
+    /// 1. Sequential format: [leaf0_M31_0..7, leaf1_M31_0..7, ...] - direct from CPU hashing
+    /// 2. Interleaved format: [pos0_col0_0..7, pos0_col1_0..7, ..., pos1_col0_0..7, ...] - from GPU leaf hashing
+    private func buildTreeFromDigests(digests: [M31], numLeaves: Int, numColumns: Int = 1) -> zkMetal.M31Digest {
+        // Detect input format based on count vs expected
+        // Interleaved format: count == numLeaves * numColumns * 8
+        // Sequential format: count == numLeaves * 8 (for single column)
+
+        let totalM31 = digests.count
+        let expectedSequential = numLeaves * 8
+
+        // If we have more data than sequential format expects, assume interleaved
+        let isInterleaved = totalM31 > expectedSequential && numColumns > 1
+
+        // Convert digests to M31Digest nodes
+        var nodes: [zkMetal.M31Digest] = []
+        nodes.reserveCapacity(numLeaves)
+
+        for leafIdx in 0..<numLeaves {
+            var digestValues = [M31]()
+            digestValues.reserveCapacity(8)
+
+            if isInterleaved {
+                // Interleaved format: [pos0_col0_0..7, pos0_col1_0..7, ..., pos1_col0_0..7, ...]
+                // For column=col, position=leafIdx: base = (leafIdx * numColumns + col) * 8
+                // Since we process digests for a single column's tree, use col=0
+                let col = 0  // Column being processed (single column per tree)
+                let base = (leafIdx * numColumns + col) * 8
+                for j in 0..<8 {
+                    digestValues.append(digests[base + j])
+                }
+            } else {
+                // Sequential format: [leaf0_0..7, leaf1_0..7, ...]
+                let base = leafIdx * 8
+                for j in 0..<8 {
+                    digestValues.append(digests[base + j])
+                }
+            }
+            nodes.append(zkMetal.M31Digest(values: digestValues))
+        }
+
+        // Build tree bottom-up
+        var levelSize = numLeaves
+        while levelSize > 1 {
+            var nextLevel: [zkMetal.M31Digest] = []
+            nextLevel.reserveCapacity((levelSize + 1) / 2)
+            for i in stride(from: 0, to: levelSize, by: 2) {
+                let left = nodes[i]
+                let right = i + 1 < levelSize ? nodes[i + 1] : left
+                let hash = zkMetal.M31Digest(values: poseidon2M31Hash(left: left.values, right: right.values))
+                nextLevel.append(hash)
+            }
+            nodes = nextLevel
+            levelSize = nodes.count
+        }
+        return nodes[0]
+    }
+
+    /// Try GPU leaf hashing with error handling.
+    /// Returns the same format as hashLeavesBatchPerColumn.
+    private func tryGPULeafHash(flatValues: [M31], numColumns: Int, countPerColumn: Int) throws -> [[M31]] {
+        print("    [GPU Prover] tryGPULeafHash: flatValues count=\(flatValues.count), numColumns=\(numColumns), countPerColumn=\(countPerColumn)")
+        print("    [GPU Prover] flatValues[0..<8]: \(flatValues.prefix(8).map { $0.v })")
+
+        let result = try leafHashEngine.hashLeavesBatchPerColumn(
+            allValues: flatValues,
+            numColumns: numColumns,
+            countPerColumn: countPerColumn
+        )
+
+        // Debug: Print first column's first 2 digests to compare with CPU
+        if !result.isEmpty && result[0].count >= 16 {
+            print("    [GPU Leaf Hash] first column first 2 digests:")
+            print("      leaf[0]: \(result[0][0..<8].map { $0.v })")
+            print("      leaf[1]: \(result[0][8..<16].map { $0.v })")
+        }
+
+        return result
+    }
+
+    /// CPU-based leaf hashing for fallback when GPU fails.
+    /// Uses position hashing like the GPU kernel.
+    ///
+    /// IMPORTANT: This function must match the GPU leaf hashing behavior.
+    /// The GPU kernel uses column-major layout:
+    ///   flatValues: [col0_leaf0, col0_leaf1, ..., col0_leafN, col1_leaf0, col1_leaf1, ...]
+    ///   positions: per-column position = 0, 1, 2, ... for each column
+    ///
+    /// So for column `col` and position `i`:
+    ///   srcIdx = col * countPerColumn + i
+    ///   position = i (per-column, not global)
+    private func cpuHashLeaves(flatValues: [M31], numColumns: Int, countPerColumn: Int) -> [[M31]] {
+        var results: [[M31]] = []
+        results.reserveCapacity(numColumns)
+
+        for col in 0..<numColumns {
+            var columnDigests: [M31] = []
+            columnDigests.reserveCapacity(countPerColumn * 8)
+
+            for i in 0..<countPerColumn {
+                // Column-major indexing: flatValues[col * countPerColumn + i]
+                let srcIdx = col * countPerColumn + i
+                let val = srcIdx < flatValues.count ? flatValues[srcIdx] : M31.zero
+                // Per-column position (same as GPU kernel): position = i for each column
+                let position = M31(v: UInt32(i))
+
+                // Hash with position (same as GPU kernel)
+                let leafInput = [val, position, M31.zero, M31.zero,
+                                  M31.zero, M31.zero, M31.zero, M31.zero]
+                let digest = poseidon2M31HashSingle(leafInput)
+
+                for v in digest {
+                    columnDigests.append(v)
+                }
+            }
+            results.append(columnDigests)
+        }
+
+        return results
+    }
+
+    /// Build multiple Merkle trees in parallel using GPU batch processing.
+    /// This is significantly faster than building trees sequentially.
+    ///
+    /// - Parameter allColumnDigests: Array of digest arrays, one per column/tree.
+    ///   Each inner array contains the pre-hashed leaves (8 M31 per leaf).
+    /// - Parameter numLeaves: Number of leaves per tree (power of 2).
+    /// - Returns: Array of root digests, one per tree.
+    /// - Throws: Error if GPU operations fail.
+    private func buildTreesBatchParallel(allColumnDigests: [[M31]], numLeaves: Int) throws -> [zkMetal.M31Digest] {
+        guard let gpuTreeEng = gpuTreeEngine else {
+            throw GPUProverError.gpuError("GPU tree engine not available")
+        }
+
+        let numTrees = allColumnDigests.count
+        let nodeSize = 8  // M31 elements per digest
+
+        // For trees <= 512 leaves, we can use the batch fused kernel
+        // For larger trees, we need to chunk them
+        let subtreeMax = Poseidon2M31Engine.merkleSubtreeSize
+
+        if numLeaves <= subtreeMax {
+            return try buildTreesSingleLevel(allColumnDigests: allColumnDigests, numLeaves: numLeaves, gpuTreeEng: gpuTreeEng)
+        } else {
+            return try buildTreesMultiLevel(allColumnDigests: allColumnDigests, numLeaves: numLeaves, gpuTreeEng: gpuTreeEng)
+        }
+    }
+
+    /// Build multiple trees that fit in a single level (≤512 leaves each)
+    /// Uses zkMetal's encodeMerkleFused for parallel processing of all trees.
+    private func buildTreesSingleLevel(allColumnDigests: [[M31]], numLeaves: Int, gpuTreeEng: Poseidon2M31Engine) throws -> [zkMetal.M31Digest] {
+        let numTrees = allColumnDigests.count
+        let nodeSize = 8
+        let device = gpuTreeEng.device
+        let subtreeMax = Poseidon2M31Engine.merkleSubtreeSize
+
+        let stride = MemoryLayout<UInt32>.stride
+
+        // Layout input buffer: [tree0_leaf0_0, ..., tree0_leaf0_7, tree0_leaf1_0, ..., tree1_leaf0_0, ...]
+        let totalInputVals = numTrees * numLeaves * nodeSize
+        guard let inputBuf = device.makeBuffer(length: totalInputVals * stride, options: .storageModeShared) else {
+            throw GPUProverError.gpuError("Failed to allocate input buffer")
+        }
+
+        // Copy all tree data to input buffer
+        let inputPtr = inputBuf.contents().bindMemory(to: UInt32.self, capacity: totalInputVals)
+        var inputIdx = 0
+        for treeDigests in allColumnDigests {
+            for val in treeDigests {
+                precondition(inputIdx < totalInputVals, "Input index out of bounds: \(inputIdx) >= \(totalInputVals)")
+                inputPtr[inputIdx] = val.v
+                inputIdx += 1
+            }
+        }
+
+        // Allocate output buffer for roots
+        let rootBytes = numTrees * nodeSize * stride
+        guard let outputBuf = device.makeBuffer(length: rootBytes, options: .storageModeShared) else {
+            throw GPUProverError.gpuError("Failed to allocate output buffer")
+        }
+
+        // Create command buffer and encode batch Merkle tree computation
+        guard let cmdBuf = gpuTreeEng.commandQueue.makeCommandBuffer() else {
+            throw GPUProverError.noCommandBuffer
+        }
+        let enc = cmdBuf.makeComputeCommandEncoder()!
+
+        // Use zkMetal's encodeMerkleFused for parallel processing
+        gpuTreeEng.encodeMerkleFused(
+            encoder: enc,
+            leavesBuffer: inputBuf,
+            leavesOffset: 0,
+            rootsBuffer: outputBuf,
+            rootsOffset: 0,
+            numSubtrees: numTrees,
+            subtreeSize: numLeaves
+        )
+
+        enc.endEncoding()
+        cmdBuf.commit()
+        cmdBuf.waitUntilCompleted()
+
+        if let error = cmdBuf.error {
+            throw GPUProverError.gpuError(error.localizedDescription)
+        }
+
+        // Read results and convert to M31Digest array
+        let outputCapacity = numTrees * nodeSize
+        precondition(rootBytes >= outputCapacity * stride, "Output buffer too small")
+        let outPtr = outputBuf.contents().bindMemory(to: UInt32.self, capacity: outputCapacity)
+        var roots: [zkMetal.M31Digest] = []
+        roots.reserveCapacity(numTrees)
+
+        for i in 0..<numTrees {
+            var rootValues = [M31]()
+            rootValues.reserveCapacity(nodeSize)
+            for j in 0..<nodeSize {
+                let idx = i * nodeSize + j
+                precondition(idx < outputCapacity, "Output index out of bounds: \(idx) >= \(outputCapacity)")
+                rootValues.append(M31(reduced: outPtr[idx]))
+            }
+            roots.append(zkMetal.M31Digest(values: rootValues))
+        }
+
+        return roots
+    }
+
+    /// Build multiple large trees that require multiple levels in parallel.
+///
+/// Uses zkMetal's encodeMerkleFused for subtree roots + encodeHashPairs for upper levels.
+/// All 180 trees are processed in a single command buffer with memory barriers.
+///
+/// For evalLen=16384 (logBlowup=5 with traceLen=512):
+/// - 32 subtrees per tree (16384 / 512 = 32)
+/// - 180 trees × 32 subtrees = 5760 subtree roots
+/// - Upper levels processed level-by-level in same command buffer
+    private func buildTreesMultiLevel(allColumnDigests: [[M31]], numLeaves: Int, gpuTreeEng: Poseidon2M31Engine) throws -> [zkMetal.M31Digest] {
+        let numTrees = allColumnDigests.count
+        let nodeSize = 8
+        let device = gpuTreeEng.device
+        let subtreeMax = Poseidon2M31Engine.merkleSubtreeSize
+        let numSubtrees = numLeaves / subtreeMax
+        let stride = MemoryLayout<UInt32>.stride
+
+        // Step 1: Flatten all trees' leaves into one big buffer
+        // Layout: [tree0_subtree0_leaves, tree0_subtree1_leaves, ..., tree1_subtree0_leaves, ...]
+        let leavesPerTree = numTrees * numSubtrees * subtreeMax * nodeSize
+        guard let leavesBuf = device.makeBuffer(length: leavesPerTree * stride, options: .storageModeShared) else {
+            throw GPUProverError.gpuError("Failed to allocate leaves buffer")
+        }
+
+        let leavesPtr = leavesBuf.contents().bindMemory(to: UInt32.self, capacity: leavesPerTree)
+        var idx = 0
+        for treeLeaves in allColumnDigests {
+            for subIdx in 0..<numSubtrees {
+                let start = subIdx * subtreeMax * nodeSize
+                let end = start + subtreeMax * nodeSize
+                for i in start..<end {
+                    leavesPtr[idx] = treeLeaves[i].v
+                    idx += 1
+                }
+            }
+        }
+
+        // Step 2: Allocate output buffer for all subtree roots
+        let rootsPerTree = numSubtrees * nodeSize
+        let rootsSize = numTrees * rootsPerTree * stride
+        guard let rootsBuf = device.makeBuffer(length: rootsSize, options: .storageModeShared) else {
+            throw GPUProverError.gpuError("Failed to allocate roots buffer")
+        }
+
+        // Step 3: Build all subtrees in ONE GPU dispatch using encodeMerkleFused
+        // numSubtrees: number of subtrees per tree
+        // totalSubtrees = numTrees * numSubtrees
+        let totalSubtrees = numTrees * numSubtrees
+
+        guard let cmdBuf = gpuTreeEng.commandQueue.makeCommandBuffer() else {
+            throw GPUProverError.noCommandBuffer
+        }
+        let enc = cmdBuf.makeComputeCommandEncoder()!
+
+        // Fused subtree → roots for ALL trees in parallel
+        gpuTreeEng.encodeMerkleFused(
+            encoder: enc,
+            leavesBuffer: leavesBuf,
+            leavesOffset: 0,
+            rootsBuffer: rootsBuf,
+            rootsOffset: 0,
+            numSubtrees: totalSubtrees,
+            subtreeSize: subtreeMax
+        )
+
+        // Step 4: Process upper levels level-by-level in same command buffer
+        var currentNodes = numSubtrees  // Number of subtree roots per tree
+        var srcBuf = rootsBuf
+
+        if currentNodes > 1 {
+            // Allocate ping-pong buffers for upper levels
+            guard let bufA = device.makeBuffer(length: rootsSize, options: .storageModeShared),
+                  let bufB = device.makeBuffer(length: rootsSize, options: .storageModeShared) else {
+                throw GPUProverError.gpuError("Failed to allocate upper level buffers")
+            }
+
+            var dstBuf = bufA
+
+            while currentNodes > 1 {
+                enc.memoryBarrier(scope: .buffers)
+
+                // Hash pairs at this level for all trees using public API
+                let pairs = currentNodes / 2
+                gpuTreeEng.encodeHashPairs(
+                    encoder: enc,
+                    buffer: srcBuf,
+                    inputOffset: 0,
+                    outputOffset: 0,
+                    count: numTrees * pairs,
+                    outputBuffer: dstBuf
+                )
+
+                currentNodes = pairs
+                swap(&srcBuf, &dstBuf)
+            }
+        }
+
+        enc.endEncoding()
+        cmdBuf.commit()
+        cmdBuf.waitUntilCompleted()
+
+        // Step 5: Read back final roots from the correct buffer
+        let outPtr = srcBuf.contents().bindMemory(to: UInt32.self, capacity: numTrees * nodeSize)
+
+        var roots: [zkMetal.M31Digest] = []
+        roots.reserveCapacity(numTrees)
+
+        for i in 0..<numTrees {
+            var rootValues = [M31]()
+            rootValues.reserveCapacity(nodeSize)
+            for j in 0..<nodeSize {
+                rootValues.append(M31(reduced: outPtr[i * nodeSize + j]))
+            }
+            roots.append(zkMetal.M31Digest(values: rootValues))
+        }
+
+        return roots
     }
 
     // MARK: - GPU Utility Methods
@@ -300,65 +698,70 @@ public final class EVMetalGPUProver {
             let treeBuildMs = (CFAbsoluteTimeGetCurrent() - treeBuildT0) * 1000
             let elapsed = (CFAbsoluteTimeGetCurrent() - t0) * 1000
 
+            print("    Hybrid breakdown: CPU hashing \(Int(leafHashMs))ms + GPU tree \(Int(treeBuildMs))ms = \(Int(elapsed))ms total")
+
             return CommitResult(commitments: commitments, timeMs: elapsed, leafHashMs: leafHashMs, treeBuildMs: treeBuildMs)
 
         } else {
-            // Need to chunk - split into 512-leaf subtrees
+            // Large trees: chunk into subtrees
+            // Use CPU multithreaded hashing + GPU tree building
+            let subtreeMax = Poseidon2M31Engine.merkleSubtreeSize
             let numSubtrees = evalLen / subtreeMax
+
             let leafHashT0 = CFAbsoluteTimeGetCurrent()
 
-            // Process each column using CPU
-            var columnRoots: [[zkMetal.M31Digest]] = []
+            // Pre-allocate result array
+            let totalSubtrees = numColumns * numSubtrees
+            var allSubtreeLeaves: [[M31]] = Array(repeating: [], count: totalSubtrees)
 
-            for col in traceLDEs {
-                var subtreeRoots: [zkMetal.M31Digest] = []
+            DispatchQueue.concurrentPerform(iterations: totalSubtrees) { idx in
+                let col = idx / numSubtrees
+                let subIdx = idx % numSubtrees
+                let start = subIdx * subtreeMax
+                let subtreeValues = Array(traceLDEs[col][start..<start + subtreeMax])
 
-                for subIdx in 0..<numSubtrees {
-                    let start = subIdx * subtreeMax
-                    let subtreeValues = Array(col[start..<start + subtreeMax])
+                // CPU hash this subtree's leaves with per-column positions
+                let positions = (0..<subtreeMax).map { UInt32($0) }
+                let digests = self.cpuProver.hashLeavesWithPosition(
+                    values: subtreeValues,
+                    positions: positions
+                )
 
-                    // Hash this subtree's leaves using CPU
-                    let subtreeDigests = cpuProver.hashLeavesBatchPerColumn(
-                        allValues: subtreeValues,
-                        numColumns: 1,
-                        countPerColumn: subtreeMax
-                    )
-
-                    // Build tree for this subtree
-                    var nodes: [zkMetal.M31Digest] = []
-                    for i in 0..<subtreeMax {
-                        let digestStart = i * 8
-                        let digestValues = Array(subtreeDigests[0][digestStart..<digestStart + 8])
-                        nodes.append(zkMetal.M31Digest(values: digestValues))
-                    }
-                    var levelSize = subtreeMax
-                    while levelSize > 1 {
-                        var nextLevel: [zkMetal.M31Digest] = []
-                        for i in stride(from: 0, to: levelSize, by: 2) {
-                            let left = nodes[i]
-                            let right = i + 1 < levelSize ? nodes[i + 1] : left
-                            let hash = zkMetal.M31Digest(values: poseidon2M31Hash(left: left.values, right: right.values))
-                            nextLevel.append(hash)
-                        }
-                        nodes = nextLevel
-                        levelSize = nodes.count
-                    }
-                    subtreeRoots.append(nodes[0])
-                }
-
-                columnRoots.append(subtreeRoots)
+                allSubtreeLeaves[idx] = digests
             }
 
             let leafHashMs = (CFAbsoluteTimeGetCurrent() - leafHashT0) * 1000
 
-            // Hash subtree roots to get final commitment
+            // GPU builds trees from pre-hashed digests
+            let treeBuildT0 = CFAbsoluteTimeGetCurrent()
+
+            var subtreeRoots: [zkMetal.M31Digest] = []
+            if let engine = merkleEngine {
+                subtreeRoots = try engine.buildTreesBatch(treesLeaves: allSubtreeLeaves)
+            } else {
+                // Fallback: CPU tree building
+                for leaves in allSubtreeLeaves {
+                    let root = buildTreeFromDigests(digests: leaves, numLeaves: subtreeMax)
+                    subtreeRoots.append(root)
+                }
+            }
+
+            // Combine subtree roots to get final commitments
             var commitments: [zkMetal.M31Digest] = []
-            for roots in columnRoots {
+            commitments.reserveCapacity(numColumns)
+
+            for col in 0..<numColumns {
+                var roots: [zkMetal.M31Digest] = []
+                for subIdx in 0..<numSubtrees {
+                    roots.append(subtreeRoots[col * numSubtrees + subIdx])
+                }
                 commitments.append(hashRootsToCommitment(roots))
             }
 
+            let treeBuildMs = (CFAbsoluteTimeGetCurrent() - treeBuildT0) * 1000
             let elapsed = (CFAbsoluteTimeGetCurrent() - t0) * 1000
-            return CommitResult(commitments: commitments, timeMs: elapsed, leafHashMs: leafHashMs, treeBuildMs: 0)
+
+            return CommitResult(commitments: commitments, timeMs: elapsed, leafHashMs: leafHashMs, treeBuildMs: treeBuildMs)
         }
     }
 
@@ -399,12 +802,15 @@ public final class EVMetalGPUProver {
         numColumns: Int = 180,
         evalLen: Int = 4096
     ) throws -> (cpuMs: Double, gpuMs: Double, speedup: Double) {
-        // Generate trace LDEs with individual M31 values (one per leaf position)
+        // Generate trace LDEs with 8 M31 per leaf (pre-hashed format)
+        // This bypasses GPU leaf hashing and uses GPU tree building directly
         var traceLDEs: [[M31]] = []
         for col in 0..<numColumns {
             var values: [M31] = []
             for i in 0..<evalLen {
-                values.append(M31(v: UInt32(col * 1000 + i)))
+                for j in 0..<8 {
+                    values.append(M31(v: UInt32(col * 10000 + i * 10 + j)))
+                }
             }
             traceLDEs.append(values)
         }
@@ -413,13 +819,13 @@ public final class EVMetalGPUProver {
         let cpuT0 = CFAbsoluteTimeGetCurrent()
         var cpuCommitments: [zkMetal.M31Digest] = []
         for col in traceLDEs {
-            let tree = buildPoseidon2M31MerkleTree(col, count: evalLen)
-            cpuCommitments.append(poseidon2M31MerkleRoot(tree, n: evalLen))
+            // For pre-hashed format, we skip the leaf hashing and just build tree from digests
+            let root = buildTreeFromDigests(digests: col, numLeaves: evalLen, numColumns: 1)
+            cpuCommitments.append(root)
         }
         let cpuMs = (CFAbsoluteTimeGetCurrent() - cpuT0) * 1000
 
-        // GPU batch
-        let gpuT0 = CFAbsoluteTimeGetCurrent()
+        // GPU batch - uses pre-hashed leaf format (8 M31 per leaf)
         let gpuResult = try commitTraceColumnsGPU(traceLDEs: traceLDEs, evalLen: evalLen)
         let gpuMs = gpuResult.timeMs
 

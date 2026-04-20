@@ -60,6 +60,14 @@ public struct EVMStack: Sendable {
     public func traceItems() -> [M31Word] {
         Array(items.prefix(maxStackDepth))
     }
+
+    /// Peek at top N stack items for trace snapshot
+    /// - Parameter count: Number of items to peek (max 16 for AIR columns)
+    /// - Returns: Array of M31Word from top of stack, newest first
+    public func peekWords(count: Int) -> [M31Word] {
+        let actualCount = min(count, height)
+        return (0..<actualCount).map { items[height - 1 - $0] }
+    }
 }
 
 /// EVM Memory: Byte-addressable, expands in 32-byte words
@@ -186,6 +194,10 @@ public struct BlockContext: Sendable {
     public let baseFee: M31Word
     public let chainId: M31Word
 
+    /// Block hashes for BLOCKHASH opcode (last 256 blocks)
+    /// Index by block number mod 256
+    public let blockhashes: [M31Word]
+
     public init(
         beneficiary: M31Word = .zero,
         gasLimit: UInt64 = 30_000_000,
@@ -194,7 +206,8 @@ public struct BlockContext: Sendable {
         difficulty: M31Word = .zero,
         prevRandao: M31Word = .zero,
         baseFee: M31Word = .zero,
-        chainId: M31Word = M31Word(low64: UInt64(1))  // Mainnet = 1
+        chainId: M31Word = M31Word(low64: UInt64(1)),  // Mainnet = 1
+        blockhashes: [M31Word] = [M31Word](repeating: .zero, count: 256)
     ) {
         self.beneficiary = beneficiary
         self.gasLimit = gasLimit
@@ -204,6 +217,18 @@ public struct BlockContext: Sendable {
         self.prevRandao = prevRandao
         self.baseFee = baseFee
         self.chainId = chainId
+        self.blockhashes = blockhashes
+    }
+
+    /// Get blockhash for a given block number
+    /// BLOCKHASH opcode returns keccak256 of block N for N in [currentBlock-256, currentBlock)
+    public func getBlockhash(_ blockNum: UInt64) -> M31Word {
+        // Only return hash for recent blocks (last 256)
+        guard blockNum < number && number - blockNum <= 256 else {
+            return .zero
+        }
+        let idx = Int(blockNum % 256)
+        return idx < blockhashes.count ? blockhashes[idx] : .zero
     }
 }
 
@@ -302,6 +327,7 @@ public struct EVMState: Sendable {
             opcode: opcode,
             gas: gas,
             stackHeight: stack.stackHeight,
+            stackSnapshot: stack.peekWords(count: 16),
             memorySize: memory.size,
             callDepth: callDepth,
             stateRoot: stateRoot,

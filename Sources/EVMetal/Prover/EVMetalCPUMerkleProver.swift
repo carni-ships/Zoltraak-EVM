@@ -1,6 +1,41 @@
 import Foundation
 import zkMetal
 
+// MARK: - Thread-Local State Cache
+
+/// Thread-local cache for hash state to avoid repeated allocations.
+/// Each thread gets its own state array that's reused across hashing operations.
+private struct ThreadLocalHashState {
+    /// Reusable state array for Poseidon2 permutation (16 elements)
+    var state: [M31]
+
+    init() {
+        state = [M31](repeating: .zero, count: 16)
+    }
+}
+
+// Thread-local storage key using OSAllocatedUnmanagedLock for thread safety
+private final class ThreadStateCache {
+    static let shared = ThreadStateCache()
+    private let lock = NSLock()
+    private var cache: [ObjectIdentifier: ThreadLocalHashState] = [:]
+
+    func getState() -> ThreadLocalHashState {
+        let threadId = ObjectIdentifier(Thread.current)
+        lock.lock()
+        let state = cache[threadId] ?? ThreadLocalHashState()
+        lock.unlock()
+        return state
+    }
+
+    func setState(_ state: ThreadLocalHashState) {
+        let threadId = ObjectIdentifier(Thread.current)
+        lock.lock()
+        cache[threadId] = state
+        lock.unlock()
+    }
+}
+
 // MARK: - EVMetalCPUMerkleProver
 
 /// CPU-based parallel leaf hashing using multithreading.
@@ -11,6 +46,11 @@ import zkMetal
 /// The key insight is that Poseidon2 permutation is computationally intensive
 /// but embarrassingly parallel - each leaf can be hashed independently on
 /// separate CPU cores using Grand Central Dispatch (GCD).
+///
+/// Memory Optimizations:
+/// - Thread-local state arrays eliminate per-leaf allocations
+/// - Pre-allocated output buffers avoid dynamic array growth
+/// - Reusable digest buffers across hashing operations
 public final class EVMetalCPUMerkleProver {
 
     // MARK: - Private State
@@ -18,12 +58,33 @@ public final class EVMetalCPUMerkleProver {
     /// Number of worker threads to use (equals CPU core count).
     private let numThreads: Int
 
+    /// Thread-local queues for parallel hashing with state reuse
+    private let threadQueues: [DispatchQueue]
+
     // MARK: - Initialization
 
     /// Creates a new CPU Merkle prover using all available CPU cores.
     public init() {
         // Use all available cores, minimum 1
         self.numThreads = max(1, ProcessInfo.processInfo.processorCount)
+
+        // Create dedicated queues for each thread to maintain thread-local state
+        var queues: [DispatchQueue] = []
+        queues.reserveCapacity(numThreads)
+        for i in 0..<numThreads {
+            let queue = DispatchQueue(label: "com.evmetal.hasher.\(i)",
+                                     attributes: .concurrent,
+                                     target: .global(qos: .userInitiated))
+            queues.append(queue)
+        }
+        self.threadQueues = queues
+    }
+
+    // MARK: - Thread-Local State Management
+
+    /// Get or create thread-local hash state
+    private func getThreadState() -> ThreadLocalHashState {
+        return ThreadStateCache.shared.getState()
     }
 
     // MARK: - Public API
@@ -64,14 +125,19 @@ public final class EVMetalCPUMerkleProver {
         return digests
     }
 
-    /// Hash leaves for multiple columns in parallel.
+    /// Hash leaves for multiple columns in parallel with memory optimizations.
     ///
-    /// Each column's leaves are at positions [colOffset, colOffset + countPerColumn).
+    /// Each column's leaves are at positions [0, countPerColumn).
     /// This is more efficient than calling `hashLeavesWithPosition` for each column
     /// separately because it parallelizes across columns.
     ///
+    /// Memory Optimizations:
+    /// - Thread-local state arrays eliminate per-leaf allocations
+    /// - Pre-allocated output buffers avoid dynamic array growth
+    /// - Batch processing reduces memory allocation overhead
+    ///
     /// - Parameters:
-    ///   - allValues: Flattened M31 values for all columns concatenated.
+    ///   - allValues: Flattened M31 values for all columns concatenated (column-major).
     ///   - numColumns: Number of columns.
     ///   - countPerColumn: Number of leaves per column.
     /// - Returns: Array of digest arrays, one per column.
@@ -82,7 +148,7 @@ public final class EVMetalCPUMerkleProver {
     ) -> [[M31]] {
         let totalCount = numColumns * countPerColumn
 
-        // Pre-allocate results
+        // Pre-allocate results with exact capacity
         var results: [[M31]] = []
         results.reserveCapacity(numColumns)
         for _ in 0..<numColumns {
@@ -98,17 +164,25 @@ public final class EVMetalCPUMerkleProver {
 
             guard start < end else { return }
 
+            // Get thread-local state for reuse
+            var threadState = getThreadState()
+
             for col in start..<end {
-                let colOffset = col * countPerColumn
                 for i in 0..<countPerColumn {
-                    let globalIdx = colOffset + i
-                    let value = allValues[globalIdx]
-                    let position = UInt32(globalIdx)
-                    let digest = hashSingleLeafWithPosition(value: value, position: position)
-                    let baseIdx = i * 8
-                    for j in 0..<8 {
-                        results[col][baseIdx + j] = digest[j]
-                    }
+                    // Column-major indexing: flatValues[col * countPerColumn + i]
+                    let srcIdx = col * countPerColumn + i
+                    let value = allValues[srcIdx]
+
+                    // Per-column position (same as GPU kernel): position = i for each column
+                    let position = UInt32(i)
+
+                    // Use optimized hashing with reusable state
+                    hashSingleLeafWithPositionOptimized(
+                        value: value,
+                        position: position,
+                        state: &threadState.state,
+                        output: &results[col][i * 8]
+                    )
                 }
             }
         }
@@ -161,7 +235,7 @@ public final class EVMetalCPUMerkleProver {
         return nodes[0]
     }
 
-    // MARK: - Single Leaf Hashing
+    // MARK: - Single Leaf Hashing (Optimized)
 
     /// Hashes a single leaf with position using Poseidon2 permutation.
     ///
@@ -179,12 +253,85 @@ public final class EVMetalCPUMerkleProver {
         var state = [M31](repeating: M31.zero, count: 16)
         state[0] = value
         state[1] = M31(v: position)
+        // Elements 2-15 are already zero from initialization
 
         // Run Poseidon2 permutation
         poseidon2M31Permutation(state: &state)
 
         // Return first 8 elements as digest
         return Array(state[0..<8])
+    }
+
+    /// Optimized leaf hashing that reuses state and output buffers.
+    ///
+    /// Memory optimizations:
+    /// - Reuses state array instead of allocating new [M31](16) each call
+    /// - Writes directly to output buffer instead of creating intermediate array
+    /// - Eliminates Array slicing overhead
+    ///
+    /// - Parameters:
+    ///   - value: The M31 value to hash.
+    ///   - position: The position to include in the hash.
+    ///   - state: Reusable state array (16 elements).
+    ///   - output: Output buffer pointer (must have space for 8 M31 elements).
+    @inline(__always)
+    private func hashSingleLeafWithPositionOptimized(
+        value: M31,
+        position: UInt32,
+        state: inout [M31],
+        output: UnsafeMutablePointer<M31>
+    ) {
+        // Initialize state: [value, position, 0, 0, ..., 0] (16 elements)
+        // Must reset ALL elements since state is reused from previous iterations
+        state[0] = value
+        state[1] = M31(v: position)
+        // Reset elements 2-15 to zero (required for correct permutation)
+        for i in 2..<16 {
+            state[i] = M31.zero
+        }
+
+        // Run Poseidon2 permutation
+        poseidon2M31Permutation(state: &state)
+
+        // Write first 8 elements directly to output buffer
+        // This avoids allocating a new array and copying
+        output.initialize(from: state, count: 8)
+    }
+
+    /// Optimized batch hashing that minimizes allocations.
+    ///
+    /// This version processes multiple leaves in a single call, allowing
+    /// for better cache locality and reduced allocation overhead.
+    ///
+    /// - Parameters:
+    ///   - values: Array of M31 values to hash.
+    ///   - positions: Array of positions (must match values count).
+    /// - Returns: Flattened digests (8 M31 elements per value).
+    @inline(__always)
+    private func hashLeavesBatchOptimized(
+        values: [M31],
+        positions: [UInt32]
+    ) -> [M31] {
+        let count = values.count
+        precondition(count == positions.count, "values and positions must have same count")
+
+        // Pre-allocate output array
+        var digests = [M31](repeating: M31.zero, count: count * 8)
+
+        // Get thread-local state for reuse
+        var threadState = getThreadState()
+
+        // Process all leaves
+        for i in 0..<count {
+            hashSingleLeafWithPositionOptimized(
+                value: values[i],
+                position: positions[i],
+                state: &threadState.state,
+                output: &digests[i * 8]
+            )
+        }
+
+        return digests
     }
 }
 

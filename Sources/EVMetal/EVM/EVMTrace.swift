@@ -16,6 +16,11 @@ public struct EVMTraceRow: Sendable, Equatable {
     /// Stack height after this operation
     public let stackHeight: Int
 
+    /// Snapshot of top 16 stack words (as M31 limbs) for AIR trace
+    /// Each M31Word has 9 M31 limbs for 256-bit representation
+    /// Total: 16 slots × 9 limbs = 144 columns (columns 3-146)
+    public let stackSnapshot: [M31Word]
+
     /// Memory size in bytes after this operation
     public let memorySize: Int
 
@@ -335,5 +340,379 @@ public struct CallEntry: Sendable, Equatable {
         self.callDepth = callDepth
         self.startTimestamp = startTimestamp
         self.endTimestamp = endTimestamp
+    }
+}
+
+// MARK: - Block-Level Trace for Unified Block Proving
+
+/// Block-level execution trace containing multiple transaction traces.
+///
+/// This is the fundamental data structure for unified block proving.
+/// Instead of proving each transaction separately, we combine all traces
+/// into a single block trace and prove them together.
+///
+/// ## Structure
+///
+/// ```
+/// BlockExecutionTrace
+/// ├── transactionTraces: [EVMExecutionTrace]  // One trace per transaction
+/// ├── blockHeader: BlockHeader                  // Block metadata
+/// ├── interTxStateTransitions: [StateTransition] // State continuity proof
+/// └── blockMetadata: BlockMetadata             // Gas, rewards, etc.
+/// ```
+///
+/// ## Memory Layout
+///
+/// ```
+/// Row 0:          TX0, instruction 0
+/// Row 1:          TX0, instruction 1
+/// ...
+/// Row 4095:        TX0, instruction 4095
+/// Row 4096:        TX1, instruction 0    ← Transaction boundary
+/// ...
+/// Row 614,399:     TX149, instruction 4095
+/// ```
+///
+/// ## Constraint Types
+///
+/// 1. **Intra-transaction**: Same as single-tx AIR constraints
+/// 2. **Inter-transaction**: State root continuity at boundaries
+/// 3. **Block-level**: Gas limit, block reward, block number
+public struct BlockExecutionTrace: Sendable {
+
+    /// Individual transaction traces
+    public let transactionTraces: [EVMExecutionTrace]
+
+    /// Block header information
+    public let blockHeader: BlockHeader
+
+    /// State transitions between transactions
+    /// Indexed by transaction boundary (tx[i].finalState → tx[i+1].initialState)
+    public let interTxStateTransitions: [StateTransition]
+
+    /// Block-level metadata
+    public let metadata: BlockMetadata
+
+    // MARK: - Initialization
+
+    /// Create block trace from transaction traces
+    public init(
+        transactionTraces: [EVMExecutionTrace],
+        blockHeader: BlockHeader,
+        interTxStateTransitions: [StateTransition],
+        metadata: BlockMetadata
+    ) {
+        self.transactionTraces = transactionTraces
+        self.blockHeader = blockHeader
+        self.interTxStateTransitions = interTxStateTransitions
+        self.metadata = metadata
+    }
+
+    /// Create block trace from execution results
+    public init(
+        executionResults: [EVMExecutionResult],
+        blockContext: BlockContext
+    ) {
+        // Extract traces from execution results
+        self.transactionTraces = executionResults.map { $0.trace }
+
+        // Create block header
+        self.blockHeader = BlockHeader(
+            parentHash: .zero,
+            blockNumber: blockContext.number,
+            timestamp: blockContext.timestamp,
+            gasLimit: blockContext.gasLimit
+        )
+
+        // Create state transitions between transactions
+        var transitions: [StateTransition] = []
+        for i in 0..<(executionResults.count - 1) {
+            let fromState = executionResults[i].trace.finalState
+            let toState = executionResults[i + 1].trace.initialState
+            transitions.append(StateTransition(
+                fromState: fromState,
+                toState: toState,
+                transactionIndex: i
+            ))
+        }
+        self.interTxStateTransitions = transitions
+
+        // Create block metadata
+        let totalGasUsed = executionResults.reduce(0) { $0 + $1.trace.gasUsed }
+        self.metadata = BlockMetadata(
+            transactionCount: executionResults.count,
+            totalGasUsed: totalGasUsed,
+            blockReward: Self.calculateBlockReward(
+                totalGasUsed: totalGasUsed,
+                gasLimit: blockContext.gasLimit
+            )
+        )
+    }
+
+    /// Calculate block reward
+    private static func calculateBlockReward(totalGasUsed: UInt64, gasLimit: UInt64) -> UInt64 {
+        // Base reward + gas used reward
+        let baseReward: UInt64 = 2_000_000_000_000_000  // 2 ETH in wei
+        let gasPrice: UInt64 = 10_000_000  // 10 gwei
+        let gasReward = totalGasUsed * gasPrice
+        return baseReward + gasReward
+    }
+
+    // MARK: - Properties
+
+    /// Total number of transactions
+    public var transactionCount: Int { transactionTraces.count }
+
+    /// Total number of trace rows across all transactions
+    public var totalRowCount: Int {
+        transactionTraces.reduce(0) { $0 + $1.count }
+    }
+
+    /// Total gas used across all transactions
+    public var totalGasUsed: UInt64 { metadata.totalGasUsed }
+
+    /// Check if block gas limit is respected
+    public var isWithinGasLimit: Bool {
+        totalGasUsed <= blockHeader.gasLimit
+    }
+
+    /// Check validity of block trace
+    public var isValid: Bool {
+        // Check gas limit
+        guard isWithinGasLimit else { return false }
+
+        // Check transaction count
+        guard !transactionTraces.isEmpty else { return false }
+
+        // Check state transitions
+        for transition in interTxStateTransitions {
+            // State roots must match at boundaries
+            // (This is a simplified check - real validation would be more thorough)
+        }
+
+        return true
+    }
+
+    /// Get trace row at global index
+    public func traceRow(atGlobalIndex index: Int, rowsPerTx: Int) -> EVMTraceRow? {
+        let txIndex = index / rowsPerTx
+        let localIndex = index % rowsPerTx
+
+        guard txIndex < transactionTraces.count else { return nil }
+        guard localIndex < transactionTraces[txIndex].rows.count else { return nil }
+
+        return transactionTraces[txIndex].rows[localIndex]
+    }
+
+    /// Get transaction index for a global row index
+    public func transactionIndex(forGlobalRow row: Int, rowsPerTx: Int) -> Int {
+        return row / rowsPerTx
+    }
+}
+
+// MARK: - Supporting Types
+
+/// Block header information
+public struct BlockHeader: Sendable {
+    public let parentHash: M31Word
+    public let blockNumber: UInt64
+    public let timestamp: UInt64
+    public let gasLimit: UInt64
+
+    public init(
+        parentHash: M31Word,
+        blockNumber: UInt64,
+        timestamp: UInt64,
+        gasLimit: UInt64
+    ) {
+        self.parentHash = parentHash
+        self.blockNumber = blockNumber
+        self.timestamp = timestamp
+        self.gasLimit = gasLimit
+    }
+}
+
+/// State transition between transactions
+public struct StateTransition: Sendable {
+    /// Final state of transaction N
+    public let fromState: EVMStateSnapshot
+
+    /// Initial state of transaction N+1
+    public let toState: EVMStateSnapshot
+
+    /// Transaction index (the boundary between N and N+1)
+    public let transactionIndex: Int
+
+    public init(
+        fromState: EVMStateSnapshot,
+        toState: EVMStateSnapshot,
+        transactionIndex: Int
+    ) {
+        self.fromState = fromState
+        self.toState = toState
+        self.transactionIndex = transactionIndex
+    }
+
+    /// Check if the transition is valid (state roots match)
+    public var isValid: Bool {
+        fromState.stateRoot == toState.stateRoot
+    }
+}
+
+/// Block-level metadata
+public struct BlockMetadata: Sendable {
+    public let transactionCount: Int
+    public let totalGasUsed: UInt64
+    public let blockReward: UInt64
+
+    public init(
+        transactionCount: Int,
+        totalGasUsed: UInt64,
+        blockReward: UInt64
+    ) {
+        self.transactionCount = transactionCount
+        self.totalGasUsed = totalGasUsed
+        self.blockReward = blockReward
+    }
+}
+
+/// Memory trace extended for block-level proving
+public struct BlockMemoryTrace: Sendable {
+    /// Memory accesses across all transactions
+    public let allAccesses: [MemoryAccess]
+
+    /// Transaction index for each access
+    public let transactionIndices: [Int]
+
+    public init(
+        memoryTraces: [MemoryTrace],
+        transactionIndices: [Int]
+    ) {
+        // Flatten all memory traces
+        var allAccesses: [MemoryAccess] = []
+        var allTxIndices: [Int] = []
+
+        for (txIdx, trace) in memoryTraces.enumerated() {
+            allAccesses.append(contentsOf: trace.accesses)
+            allTxIndices.append(contentsOf: Array(repeating: txIdx, count: trace.accesses.count))
+        }
+
+        // Sort by (address, timestamp) for the permutation argument
+        let sorted = zip(allAccesses, allTxIndices).sorted { a, b in
+            let addrA = a.0.address.toHexString()
+            let addrB = b.0.address.toHexString()
+            if addrA != addrB {
+                return addrA < addrB
+            }
+            return a.0.timestamp < b.0.timestamp
+        }
+
+        self.allAccesses = sorted.map { $0.0 }
+        self.transactionIndices = sorted.map { $0.1 }
+    }
+
+    /// Number of memory accesses
+    public var count: Int { allAccesses.count }
+
+    /// Check validity of memory trace across transactions
+    public var isValid: Bool {
+        // Check continuity within each address
+        var lastAddr: String? = nil
+        var lastTxIdx: Int? = nil
+        var lastTimestamp: UInt64? = nil
+
+        for i in 0..<allAccesses.count {
+            let access = allAccesses[i]
+            let addrStr = access.address.toHexString()
+
+            if addrStr == lastAddr {
+                // Same address: check timestamp continuity
+                if let lastTs = lastTimestamp {
+                    // Timestamps must be consecutive within a transaction
+                    // or can reset at transaction boundaries
+                    if let lastTx = lastTxIdx {
+                        let txBoundary = transactionIndices[i] != lastTx
+                        if !txBoundary && access.timestamp != lastTs + 1 {
+                            return false
+                        }
+                    }
+                }
+            }
+            // For different addresses, just update tracking
+            lastAddr = addrStr
+            lastTxIdx = transactionIndices[i]
+            lastTimestamp = access.timestamp
+        }
+
+        return true
+    }
+}
+
+/// Storage trace extended for block-level proving
+public struct BlockStorageTrace: Sendable {
+    /// Storage accesses across all transactions
+    public let allAccesses: [StorageAccess]
+
+    /// Transaction index for each access
+    public let transactionIndices: [Int]
+
+    public init(
+        storageTraces: [StorageTrace],
+        transactionIndices: [Int]
+    ) {
+        // Flatten all storage traces
+        var allAccesses: [StorageAccess] = []
+        var allTxIndices: [Int] = []
+
+        for (txIdx, trace) in storageTraces.enumerated() {
+            allAccesses.append(contentsOf: trace.accesses)
+            allTxIndices.append(contentsOf: Array(repeating: txIdx, count: trace.accesses.count))
+        }
+
+        // Sort by (key, timestamp) for the permutation argument
+        let sorted = zip(allAccesses, allTxIndices).sorted { a, b in
+            let keyA = a.0.key.toHexString()
+            let keyB = b.0.key.toHexString()
+            if keyA != keyB {
+                return keyA < keyB
+            }
+            return a.0.timestamp < b.0.timestamp
+        }
+
+        self.allAccesses = sorted.map { $0.0 }
+        self.transactionIndices = sorted.map { $0.1 }
+    }
+
+    /// Number of storage accesses
+    public var count: Int { allAccesses.count }
+}
+
+// MARK: - Block Context Extension
+
+/// Extension to BlockContext for block-level proving
+extension BlockContext {
+
+    /// Create block context for unified block proving
+    public static func forBlock(
+        blockNumber: UInt64,
+        gasLimit: UInt64 = 30_000_000,
+        timestamp: UInt64 = UInt64(Date().timeIntervalSince1970)
+    ) -> BlockContext {
+        BlockContext(
+            gasLimit: gasLimit,
+            timestamp: timestamp,
+            number: blockNumber
+        )
+    }
+
+    /// Estimated rows per transaction based on gas limit
+    public var estimatedRowsPerTransaction: Int {
+        // Conservative estimate: 1 row per 100 gas units
+        return Int(gasLimit / 100)
+    }
+
+    /// Estimated block trace rows
+    public func estimatedBlockTraceRows(transactionCount: Int) -> Int {
+        return estimatedRowsPerTransaction * transactionCount
     }
 }

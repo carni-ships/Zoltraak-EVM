@@ -15,37 +15,85 @@ public enum EVMExecutionError: Error, Sendable {
 }
 
 /// EVM Interpreter that executes bytecode and generates execution traces
+///
+/// Memory optimizations:
+/// - Pre-allocated trace collections based on estimated execution size
+/// - Reusable trace row builders to reduce allocations
+/// - Efficient memory access tracking
 public final class EVMExecutionEngine: Sendable {
     public let block: BlockContext
     public let tx: TransactionContext
 
-    // Trace collectors
+    // MARK: - Trace collectors (optimized)
+
     private var traceRows: [EVMTraceRow] = []
     private var memoryAccesses: [MemoryAccess] = []
     private var storageAccesses: [StorageAccess] = []
     private var callEntries: [CallEntry] = []
     private var memoryTimestamp: UInt64 = 0
+    private var storageTimestamp: UInt64 = 0
+
+    // Estimated trace capacity based on gas limit
+    // Each operation costs at least 2 gas, so we can estimate max rows
+    private var estimatedTraceCapacity: Int = 0
 
     public init(block: BlockContext = BlockContext(), tx: TransactionContext = TransactionContext()) {
         self.block = block
         self.tx = tx
     }
 
+    // MARK: - Thread-Local Factory
+
+    /// Create a new engine instance for thread-local execution
+    /// Ensures each thread has its own isolated state
+    public static func threadLocal(
+        block: BlockContext = BlockContext(),
+        tx: TransactionContext = TransactionContext()
+    ) -> EVMExecutionEngine {
+        return EVMExecutionEngine(block: block, tx: tx)
+    }
+
     // MARK: - Public API
 
     /// Execute a transaction/call and return the execution trace
+    /// Memory-optimized with pre-allocated collections
     public func execute(
         code: [UInt8],
         calldata: [UInt8] = [],
         value: M31Word = .zero,
         gasLimit: UInt64 = 30_000_000
     ) throws -> EVMExecutionResult {
-        // Reset state
-        traceRows = []
-        memoryAccesses = []
-        storageAccesses = []
-        callEntries = []
+        return try executeInternal(
+            code: code,
+            calldata: calldata,
+            value: value,
+            gasLimit: gasLimit,
+            block: block,
+            tx: tx
+        )
+    }
+
+    /// Thread-safe execution with explicit state
+    /// Use this method when executing from multiple threads
+    internal func executeInternal(
+        code: [UInt8],
+        calldata: [UInt8] = [],
+        value: M31Word = .zero,
+        gasLimit: UInt64 = 30_000_000,
+        block: BlockContext,
+        tx: TransactionContext
+    ) throws -> EVMExecutionResult {
+        // Estimate trace capacity based on gas limit
+        // Conservative estimate: 1 row per 100 gas units
+        estimatedTraceCapacity = Int(gasLimit / 100)
+
+        // Reset state with pre-allocated capacity
+        traceRows.reserveCapacity(estimatedTraceCapacity)
+        memoryAccesses.reserveCapacity(estimatedTraceCapacity / 10)  // Assume 10% memory ops
+        storageAccesses.reserveCapacity(estimatedTraceCapacity / 20)  // Assume 5% storage ops
+        callEntries.reserveCapacity(10)  // Most txs have <10 calls
         memoryTimestamp = 0
+        storageTimestamp = 0
 
         // Initialize state
         var state = EVMState(block: block, tx: tx)
@@ -62,9 +110,22 @@ public final class EVMExecutionEngine: Sendable {
         // Mark address as accessed
         state.accessedAddresses.insert(state.currentFrame.address.toHexString())
 
-        // Execute until halt
-        while state.running {
+        // Execute until halt or gas exhaustion
+        var iterations = 0
+        let maxIterations = 1_000_000  // Safety limit
+        while state.running && iterations < maxIterations {
             try executeNextInstruction(&state)
+            iterations += 1
+
+            // Periodically check for gas exhaustion
+            if iterations % 1000 == 0 && state.gas == 0 {
+                state.stop()
+            }
+        }
+
+        if iterations >= maxIterations {
+            print("WARNING: Execution hit max iterations limit (\(maxIterations))")
+            state.stop()
         }
 
         // Build final trace
@@ -97,6 +158,16 @@ public final class EVMExecutionEngine: Sendable {
         )
     }
 
+    /// Reset engine state for reuse (reduces allocation overhead)
+    public func reset() {
+        traceRows.removeAll(keepingCapacity: true)
+        memoryAccesses.removeAll(keepingCapacity: true)
+        storageAccesses.removeAll(keepingCapacity: true)
+        callEntries.removeAll(keepingCapacity: true)
+        memoryTimestamp = 0
+        storageTimestamp = 0
+    }
+
     // MARK: - Instruction Execution
 
     private func executeNextInstruction(_ state: inout EVMState) throws {
@@ -111,29 +182,14 @@ public final class EVMExecutionEngine: Sendable {
         let opcode = code[pc]
         state.pc += 1
 
-        // Record trace row BEFORE execution
-        let row = EVMTraceRow(
-            pc: pc,
-            opcode: opcode,
-            gas: state.gas,
-            stackHeight: state.stack.stackHeight,
-            memorySize: state.memory.size,
-            callDepth: state.callDepth,
-            stateRoot: state.stateRoot,
-            isRunning: state.running,
-            isReverted: state.reverted,
-            timestamp: UInt64(Date().timeIntervalSince1970 * 1000)
-        )
-        traceRows.append(row)
-
-        // Execute opcode
+        // Execute opcode FIRST to get post-execution state
         guard let evmOp = EVMOpcode(rawValue: opcode) else {
             throw EVMExecutionError.invalidOpcode(opcode: opcode)
         }
 
         switch evmOp {
         // Stop and Arithmetic
-        case .STOP:     state.stop(); return
+        case .STOP:     state.stop(); recordTraceRow(pc: pc, opcode: opcode, state: state); return
         case .ADD:      try add_op(&state)
         case .SUB:      try sub_op(&state)
         case .MUL:      try mul_op(&state)
@@ -194,6 +250,8 @@ public final class EVMExecutionEngine: Sendable {
         case .MLOAD:   try mload_op(&state)
         case .MSTORE:  try mstore_op(&state)
         case .MSTORE8: try mstore8_op(&state)
+        case .SLOAD:   try sload_op(&state)
+        case .SSTORE:  try sstore_op(&state)
         case .JUMP:   try jump_op(&state)
         case .JUMPI:  try jumpi_op(&state)
         case .JUMPDEST: break  // No-op, just a valid jump target
@@ -223,8 +281,8 @@ public final class EVMExecutionEngine: Sendable {
         case .LOG0, .LOG1, .LOG2, .LOG3, .LOG4: try log_op(&state, op: evmOp)
 
         // System
-        case .RETURN:   state.stop(); return
-        case .REVERT:   state.revert(message: "REVERT"); state.stop(); return
+        case .RETURN:   state.stop(); recordTraceRow(pc: pc, opcode: opcode, state: state); return
+        case .REVERT:   state.revert(message: "REVERT"); state.stop(); recordTraceRow(pc: pc, opcode: opcode, state: state); return
         case .CALL:     try call_op(&state)
         case .DELEGATECALL: try delegatecall_op(&state)
         case .STATICCALL: try staticcall_op(&state)
@@ -241,6 +299,28 @@ public final class EVMExecutionEngine: Sendable {
         default:
             throw EVMExecutionError.invalidOpcode(opcode: opcode)
         }
+
+        // Record trace row AFTER execution with post-state values
+        // This captures the state AFTER the opcode took effect, which is what AIR constraints need
+        recordTraceRow(pc: pc, opcode: opcode, state: state)
+    }
+
+    /// Helper to record a trace row with current state values
+    private func recordTraceRow(pc: Int, opcode: UInt8, state: EVMState) {
+        let stackSnapshot = state.stack.peekWords(count: 16)
+        traceRows.append(EVMTraceRow(
+            pc: pc,
+            opcode: opcode,
+            gas: state.gas,
+            stackHeight: state.stack.stackHeight,
+            stackSnapshot: stackSnapshot,
+            memorySize: state.memory.size,
+            callDepth: state.callDepth,
+            stateRoot: state.stateRoot,
+            isRunning: state.running,
+            isReverted: state.reverted,
+            timestamp: UInt64(Date().timeIntervalSince1970 * 1000)
+        ))
     }
 
     // MARK: - Arithmetic Operations
@@ -406,7 +486,7 @@ public final class EVMExecutionEngine: Sendable {
         let b = state.stack.pop()
         let a = state.stack.pop()
         if !state.chargeGas(3) { throw EVMExecutionError.outOfGas }
-        let byteIndex = Int(b.low32)
+        let byteIndex = Int(UInt64(b.low32))
         if byteIndex < 32 {
             let val = a.toBytes()[byteIndex]
             state.stack.push(M31Word(low64: UInt64(val)))
@@ -438,7 +518,7 @@ public final class EVMExecutionEngine: Sendable {
         let offset = state.stack.pop()
         if !state.chargeGas(3) { throw EVMExecutionError.outOfGas }
 
-        let offsetInt = Int(offset.low32)
+        let offsetInt = Int(UInt64(offset.low32))
         state.memory.expand(offset: offsetInt, size: 32)
         let value = state.memory.loadWord(offset: offsetInt)
 
@@ -463,7 +543,7 @@ public final class EVMExecutionEngine: Sendable {
         let value = state.stack.pop()
         if !state.chargeGas(3) { throw EVMExecutionError.outOfGas }
 
-        let offsetInt = Int(offset.low32)
+        let offsetInt = Int(UInt64(offset.low32))
         state.memory.expand(offset: offsetInt, size: 32)
         state.memory.storeWord(offset: offsetInt, value: value)
 
@@ -486,7 +566,7 @@ public final class EVMExecutionEngine: Sendable {
         let value = state.stack.pop()
         if !state.chargeGas(3) { throw EVMExecutionError.outOfGas }
 
-        let offsetInt = Int(offset.low32)
+        let offsetInt = Int(UInt64(offset.low32))
         state.memory.expand(offset: offsetInt, size: 1)
         state.memory.storeByte(offset: offsetInt, value: UInt8(value.low32 & 0xFF))
     }
@@ -498,19 +578,20 @@ public final class EVMExecutionEngine: Sendable {
         let dest = state.stack.pop()
         if !state.chargeGas(8) { throw EVMExecutionError.outOfGas }
 
-        let destInt = Int(dest.low32)
+        let destInt = Int(UInt64(dest.low32))
         // In a real implementation, we'd verify this is a JUMPDEST
         state.pc = destInt
     }
 
     private func jumpi_op(_ state: inout EVMState) throws {
         guard state.stack.stackHeight >= 2 else { throw EVMExecutionError.stackUnderflow }
-        let dest = state.stack.pop()
+        // In EVM, stack has [dest, condition] with condition on top
         let condition = state.stack.pop()
+        let dest = state.stack.pop()
         if !state.chargeGas(10) { throw EVMExecutionError.outOfGas }
 
         if !condition.isZero {
-            let destInt = Int(dest.low32)
+            let destInt = Int(UInt64(dest.low32))
             state.pc = destInt
         }
     }
@@ -530,9 +611,9 @@ public final class EVMExecutionEngine: Sendable {
             bytes.append(code[pc + i])
         }
 
-        // Pad to 32 bytes
+        // Pad to 32 bytes - prepend zeroes (high-order bytes in big-endian)
         while bytes.count < 32 {
-            bytes.append(0x00)
+            bytes.insert(0x00, at: 0)  // Insert at front for big-endian
         }
 
         state.pc = pc + byteCount
@@ -551,6 +632,11 @@ public final class EVMExecutionEngine: Sendable {
 
     private func swap_op(_ state: inout EVMState, op: EVMOpcode) throws {
         guard let pos = op.swapPosition else { return }
+        // SWAP swaps top with position (1-indexed from top), so need pos+1 items
+        // SWAP1 needs 2 items, SWAP16 needs 17 items
+        if state.stack.stackHeight < pos + 1 {
+            throw EVMExecutionError.stackUnderflow
+        }
         if !state.chargeGas(3) { throw EVMExecutionError.outOfGas }
         state.stack.Swap(position: pos)
     }
@@ -636,8 +722,8 @@ public final class EVMExecutionEngine: Sendable {
         let size = state.stack.pop()
         if !state.chargeGas(30) { throw EVMExecutionError.outOfGas }
 
-        let offsetInt = Int(offset.low32)
-        let sizeInt = Int(size.low32)
+        let offsetInt = Int(UInt64(offset.low32))
+        let sizeInt = Int(UInt64(size.low32))
         state.memory.expand(offset: offsetInt, size: sizeInt)
 
         // TODO: Actually compute Keccak-256 via zkmetal's Keccak engine
@@ -659,7 +745,7 @@ public final class EVMExecutionEngine: Sendable {
         let offset = state.stack.pop()
         if !state.chargeGas(3) { throw EVMExecutionError.outOfGas }
 
-        let offsetInt = Int(offset.low32)
+        let offsetInt = Int(UInt64(offset.low32))
         let calldata = state.currentFrame.calldata
         var word = [UInt8](repeating: 0, count: 32)
 
@@ -719,9 +805,109 @@ public final class EVMExecutionEngine: Sendable {
 
     private func blockhash_op(_ state: inout EVMState) throws {
         guard state.stack.stackHeight >= 1 else { throw EVMExecutionError.stackUnderflow }
-        let blockNum = state.stack.pop()
+        let blockNumWord = state.stack.pop()
         if !state.chargeGas(20) { throw EVMExecutionError.outOfGas }
-        state.stack.push(.zero)  // Simplified - return 0 for non-recent blocks
+
+        // Extract block number as UInt64
+        let blockNum = blockNumWord.low64
+
+        // Get blockhash from block context
+        let hash = state.block.getBlockhash(blockNum)
+        state.stack.push(hash)
+    }
+
+    // MARK: - Storage Operations
+
+    private func sload_op(_ state: inout EVMState) throws {
+        guard state.stack.stackHeight >= 1 else { throw EVMExecutionError.stackUnderflow }
+        let key = state.stack.pop()
+
+        // Track storage key for EIP-2929 access list
+        let keyHex = key.toHexString()
+        let address = state.currentFrame.address.toHexString()
+        let storageKey = "\(address):\(keyHex)"
+
+        // Calculate gas cost: 2100 for cold access, 100 for warm access (EIP-2929)
+        let isWarm = state.accessedStorageKeys.contains(storageKey)
+        let gasCost: UInt64 = isWarm ? 100 : 2100
+        if !state.chargeGas(gasCost) { throw EVMExecutionError.outOfGas }
+
+        // Mark as accessed
+        state.accessedStorageKeys.insert(storageKey)
+
+        // Load value from storage
+        let value = state.storage.load(key: key)
+
+        // Record storage access
+        let access = StorageAccess(
+            key: key,
+            value: value,
+            timestamp: storageTimestamp,
+            accessType: .load,
+            callDepth: state.callDepth
+        )
+        storageAccesses.append(access)
+        storageTimestamp += 1
+
+        state.stack.push(value)
+    }
+
+    private func sstore_op(_ state: inout EVMState) throws {
+        guard state.stack.stackHeight >= 2 else { throw EVMExecutionError.stackUnderflow }
+        let key = state.stack.pop()
+        let value = state.stack.pop()
+
+        // Track storage key for EIP-2929 access list
+        let keyHex = key.toHexString()
+        let address = state.currentFrame.address.toHexString()
+        let storageKey = "\(address):\(keyHex)"
+
+        // Get current value
+        let currentValue = state.storage.load(key: key)
+
+        // Calculate gas cost based on EIP-2929 and EIP-2200
+        let isWarm = state.accessedStorageKeys.contains(storageKey)
+        let gasCost: UInt64
+
+        if !isWarm {
+            // Cold access: 2100 to add to access list
+            gasCost = 2100
+        } else {
+            // Warm access
+            if currentValue.isZero && !value.isZero {
+                // Setting a zero slot to non-zero (creation)
+                gasCost = 20_000
+            } else if !currentValue.isZero && value.isZero {
+                // Setting a non-zero slot to zero (deletion/refund)
+                gasCost = 5_000
+                state.gasRefund += 15_000  // Refund for clearing storage
+            } else {
+                // Modifying an existing slot or setting zero to zero
+                gasCost = 5_000
+            }
+        }
+
+        if !state.chargeGas(gasCost) { throw EVMExecutionError.outOfGas }
+
+        // Mark as accessed
+        state.accessedStorageKeys.insert(storageKey)
+
+        // Store value in storage
+        state.storage.store(key: key, value: value)
+
+        // Record storage access
+        let access = StorageAccess(
+            key: key,
+            value: value,
+            timestamp: storageTimestamp,
+            accessType: .store,
+            callDepth: state.callDepth
+        )
+        storageAccesses.append(access)
+        storageTimestamp += 1
+
+        // Update state root (simplified - in real implementation would compute Merkle root)
+        // state.stateRoot = computeNewStateRoot(stateRoot, key, value)
     }
 }
 

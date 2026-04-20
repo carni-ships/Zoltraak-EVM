@@ -78,6 +78,8 @@ public enum EVMOpcode: UInt8, CaseIterable, Sendable {
     case MLOAD         = 0x51  // Load from memory, gas: 3
     case MSTORE        = 0x52  // Store to memory, gas: 3
     case MSTORE8       = 0x53  // Store byte to memory, gas: 3
+    case SLOAD         = 0x54  // Load from storage, gas: 2100 (cold) / 100 (warm)
+    case SSTORE        = 0x55  // Store to storage, gas: dynamic
     case JUMP          = 0x56  // Conditional jump, gas: 8
     case JUMPI         = 0x57  // Conditional jump if true, gas: 10
     case JUMPDEST      = 0x5B  // Valid jump destination, gas: 1
@@ -317,6 +319,8 @@ extension EVMOpcode {
         case .MLOAD:         return OpcodeProperties(name: "MLOAD", gas: 3, stackHeightChange: 1, category: .memory, isMemoryOp: true)
         case .MSTORE:        return OpcodeProperties(name: "MSTORE", gas: 3, stackHeightChange: -2, category: .memory, isMemoryOp: true)
         case .MSTORE8:       return OpcodeProperties(name: "MSTORE8", gas: 3, stackHeightChange: -2, category: .memory, isMemoryOp: true)
+        case .SLOAD:         return OpcodeProperties(name: "SLOAD", gas: 2100, stackHeightChange: 0, category: .memory, isStorageOp: true)
+        case .SSTORE:        return OpcodeProperties(name: "SSTORE", gas: 20000, stackHeightChange: -2, category: .memory, isStorageOp: true)
         case .JUMP:          return OpcodeProperties(name: "JUMP", gas: 8, stackHeightChange: -1, category: .controlFlow, isControlFlow: true)
         case .JUMPI:         return OpcodeProperties(name: "JUMPI", gas: 10, stackHeightChange: -2, category: .controlFlow, isControlFlow: true)
         case .JUMPDEST:      return OpcodeProperties(name: "JUMPDEST", gas: 1, stackHeightChange: 0, category: .controlFlow)
@@ -471,7 +475,7 @@ extension EVMOpcode {
             .ADDRESS, .CALLER, .CALLVALUE, .CALLDATASIZE, .CALLDATACOPY,
             .CODESIZE, .CODECOPY, .GASPRICE,
             .BLOCKHASH, .NUMBER, .TIMESTAMP, .COINBASE, .PREVRANDAO, .GASLIMIT,
-            .POP, .MLOAD, .MSTORE, .MSTORE8,
+            .POP, .MLOAD, .MSTORE, .MSTORE8, .SLOAD, .SSTORE,
             .JUMP, .JUMPI, .JUMPDEST, .PC, .MSIZE, .GAS,
             .PUSH1, .PUSH2, .PUSH3, .PUSH4, .PUSH5, .PUSH6, .PUSH7, .PUSH8,
             .PUSH9, .PUSH10, .PUSH11, .PUSH12, .PUSH13, .PUSH14, .PUSH15, .PUSH16,
