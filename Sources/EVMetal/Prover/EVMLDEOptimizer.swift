@@ -253,7 +253,7 @@ public final class EVMLDEOptimizer {
             let ptr = bufs[colIdx].contents().bindMemory(to: UInt32.self, capacity: evalLen)
             var lde = [M31](repeating: .zero, count: evalLen)
             for i in 0..<evalLen {
-                lde[i] = M31(reduced: ptr[i])
+                lde[i] = M31(v: ptr[i])
             }
             results.append(lde)
         }

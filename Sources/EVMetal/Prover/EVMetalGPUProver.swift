@@ -462,7 +462,7 @@ public final class EVMetalGPUProver {
             for j in 0..<nodeSize {
                 let idx = i * nodeSize + j
                 precondition(idx < outputCapacity, "Output index out of bounds: \(idx) >= \(outputCapacity)")
-                rootValues.append(M31(reduced: outPtr[idx]))
+                rootValues.append(M31(v: outPtr[idx]))
             }
             roots.append(zkMetal.M31Digest(values: rootValues))
         }
@@ -581,7 +581,7 @@ public final class EVMetalGPUProver {
             var rootValues = [M31]()
             rootValues.reserveCapacity(nodeSize)
             for j in 0..<nodeSize {
-                rootValues.append(M31(reduced: outPtr[i * nodeSize + j]))
+                rootValues.append(M31(v: outPtr[i * nodeSize + j]))
             }
             roots.append(zkMetal.M31Digest(values: rootValues))
         }

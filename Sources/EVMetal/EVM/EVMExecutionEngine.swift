@@ -1,5 +1,6 @@
 import Foundation
 import zkMetal
+import CryptoKit
 
 /// Errors during EVM execution
 public enum EVMExecutionError: Error, Sendable {
@@ -361,11 +362,13 @@ public final class EVMExecutionEngine: Sendable {
         let b = state.stack.pop()
         let a = state.stack.pop()
         if !state.chargeGas(5) { throw EVMExecutionError.outOfGas }
-        // Simplified: in real implementation, handle division by zero and signed semantics
-        if b.toBytes().allSatisfy({ $0 == 0 }) {
+
+        let bBytes = b.toBytes()
+        if bBytes.allSatisfy({ $0 == 0 }) {
             state.stack.push(.zero)
         } else {
-            state.stack.push(a)  // TODO: Actual division
+            let (q, _) = divMod256(a, b)
+            state.stack.push(q)
         }
     }
 
@@ -374,7 +377,14 @@ public final class EVMExecutionEngine: Sendable {
         let b = state.stack.pop()
         let a = state.stack.pop()
         if !state.chargeGas(5) { throw EVMExecutionError.outOfGas }
-        state.stack.push(.zero)  // TODO: Actual modulo
+
+        let bBytes = b.toBytes()
+        if bBytes.allSatisfy({ $0 == 0 }) {
+            state.stack.push(a)
+        } else {
+            let (_, r) = divMod256(a, b)
+            state.stack.push(r)
+        }
     }
 
     private func addmod_op(_ state: inout EVMState) throws {
@@ -383,8 +393,10 @@ public final class EVMExecutionEngine: Sendable {
         let b = state.stack.pop()
         let a = state.stack.pop()
         if !state.chargeGas(8) { throw EVMExecutionError.outOfGas }
-        // (a + b) mod c - simplified
-        state.stack.push(.zero)
+
+        // (a + b) mod c
+        let (q, _) = divMod256(a.add(b).result, c)
+        state.stack.push(q)
     }
 
     private func mulmod_op(_ state: inout EVMState) throws {
@@ -393,7 +405,75 @@ public final class EVMExecutionEngine: Sendable {
         let b = state.stack.pop()
         let a = state.stack.pop()
         if !state.chargeGas(8) { throw EVMExecutionError.outOfGas }
-        state.stack.push(.zero)  // TODO: Actual mulmod
+
+        // Full 256-bit mulmod: (a * b) mod c
+        // Handle c == 0 case (mod by zero returns 0 per EVM spec)
+        if c.isZero {
+            state.stack.push(M31Word.zero)
+            return
+        }
+
+        // Convert operands to UInt64 limbs (4 x 64-bit = 256 bits)
+        let a64 = toUInt64Limbs(a)
+        let b64 = toUInt64Limbs(b)
+
+        // Compute full 512-bit product using schoolbook multiplication
+        var product512 = [UInt64](repeating: 0, count: 8)
+        for i in 0..<4 {
+            var carry: UInt64 = 0
+            for j in 0..<4 {
+                let (low, high) = a64[i].multipliedFullWidth(by: b64[j])
+                let idx = i + j
+
+                // Accumulate into product[idx] with carry
+                let (sum0, o0) = product512[idx].addingReportingOverflow(low)
+                let (sum1, o1) = sum0.addingReportingOverflow(carry)
+                product512[idx] = sum1
+                carry = high &+ (o0 ? 1 : 0) &+ (o1 ? 1 : 0)
+
+                // Propagate carry to next word
+                if idx + 1 < 8 {
+                    let (sum2, o2) = product512[idx + 1].addingReportingOverflow(carry)
+                    product512[idx + 1] = sum2
+                    carry = o2 ? 1 : 0
+                }
+            }
+            // Continue carry propagation
+            var k = i + 2
+            while carry != 0 && k < 8 {
+                let (sumK, oK) = product512[k].addingReportingOverflow(carry)
+                product512[k] = sumK
+                carry = oK ? 1 : 0
+                k += 1
+            }
+        }
+
+        // Split into high and low 256-bit parts for modular reduction
+        let low256 = m31WordFromUInt64Limbs([product512[0], product512[1], product512[2], product512[3]])
+        let high256 = m31WordFromUInt64Limbs([product512[4], product512[5], product512[6], product512[7]])
+
+        // Compute (a * b) mod c = (high * 2^256 + low) mod c
+        // Using: X mod c = ((high mod c) * (2^256 mod c) + (low mod c)) mod c
+        let (_, lowMod) = divMod256(low256, c)
+        let (_, highMod) = divMod256(high256, c)
+
+        // Compute 2^256 mod c using expMod256
+        // Exponent 2^256 = [0, 0, 0, 1] in little-endian UInt64 representation
+        let two256ModC = expMod256(
+            M31Word(bytes: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            M31Word(bytes: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]),
+            c
+        )
+
+        // Compute (highMod * two256ModC) using mulBigInt then reduce
+        let highTimesTwo256 = mulBigInt(toUInt64Limbs(highMod), toUInt64Limbs(two256ModC))
+        let highTimesTwo256Word = m31WordFromUInt64Limbs(highTimesTwo256)
+        let (_, productMod) = divMod256(highTimesTwo256Word, c)
+
+        // Final result: (productMod + lowMod) mod c
+        let finalSum = productMod.add(lowMod).result
+        let (_, result) = divMod256(finalSum, c)
+        state.stack.push(result)
     }
 
     private func exp_op(_ state: inout EVMState) throws {
@@ -401,7 +481,10 @@ public final class EVMExecutionEngine: Sendable {
         let exponent = state.stack.pop()
         let base = state.stack.pop()
         if !state.chargeGas(10) { throw EVMExecutionError.outOfGas }
-        state.stack.push(.one)  // TODO: Actual exponentiation
+
+        // base^(exponent) mod 2^256
+        let result = expMod256(base, exponent, .zero)  // mod 0 means no modulus
+        state.stack.push(result)
     }
 
     private func signextend_op(_ state: inout EVMState) throws {
@@ -409,7 +492,30 @@ public final class EVMExecutionEngine: Sendable {
         let b = state.stack.pop()
         let a = state.stack.pop()
         if !state.chargeGas(5) { throw EVMExecutionError.outOfGas }
-        state.stack.push(a)  // TODO: Actual signextend
+
+        let k = Int(b.low32)
+        if k < 31 {
+            let aBytes = a.toBytes()
+            var result = aBytes
+            // Sign bit is at bit (k+1)*8-1 = 8k+7
+            let signByteIdx = 31 - k
+            let signBitIdx = k * 8 + 7
+            let signByte = aBytes[Int(signByteIdx)]
+            let signBit = (signByte >> (7 - (k * 8))) & 1
+
+            if signBit == 1 {
+                // Extend with 0xFF
+                for i in 0..<signByteIdx {
+                    result[i] = 0xFF
+                }
+                // Mask the sign byte
+                let mask: UInt8 = (1 << (8 - k)) - 1
+                result[Int(signByteIdx)] = signByte | mask
+            }
+            state.stack.push(M31Word(bytes: result))
+        } else {
+            state.stack.push(a)
+        }
     }
 
     // MARK: - Comparison and Bitwise
@@ -498,9 +604,23 @@ public final class EVMExecutionEngine: Sendable {
     private func shift_op(_ state: inout EVMState, left: Bool) throws {
         guard state.stack.stackHeight >= 2 else { throw EVMExecutionError.stackUnderflow }
         let shift = state.stack.pop()
-        let a = state.stack.pop()
+        let value = state.stack.pop()
         if !state.chargeGas(3) { throw EVMExecutionError.outOfGas }
-        state.stack.push(.zero)  // TODO: Actual shift
+
+        let shiftBits = Int(shift.low32)
+
+        if shiftBits >= 256 {
+            state.stack.push(.zero)
+        } else {
+            let valueLimbs = toUInt64Limbs(value)
+            let shiftedLimbs: [UInt64]
+            if left {
+                shiftedLimbs = shiftLeft256(valueLimbs, by: shiftBits)
+            } else {
+                shiftedLimbs = shiftRight256(valueLimbs, by: shiftBits)
+            }
+            state.stack.push(m31WordFromUInt64Limbs(shiftedLimbs))
+        }
     }
 
     private func sar_op(_ state: inout EVMState) throws {
@@ -508,7 +628,49 @@ public final class EVMExecutionEngine: Sendable {
         let shift = state.stack.pop()
         let a = state.stack.pop()
         if !state.chargeGas(3) { throw EVMExecutionError.outOfGas }
-        state.stack.push(.zero)  // TODO: Actual SAR
+
+        let shiftBits = Int(shift.low32)
+
+        // Convert to UInt64 limbs for 256-bit arithmetic
+        let aLimbs = toUInt64Limbs(a)
+
+        // Check sign bit (MSB of most significant limb limbs[3])
+        let isNegative = (aLimbs[3] & 0x8000000000000000) != 0
+
+        var result: [UInt64]
+
+        if shiftBits >= 256 {
+            // If shift >= 256: result is all 1s for negative, or 0 for positive/zero
+            if isNegative {
+                result = [UInt64](repeating: 0xFFFFFFFFFFFFFFFF, count: 4)
+            } else {
+                result = [UInt64](repeating: 0, count: 4)
+            }
+        } else if shiftBits == 0 {
+            // No shift needed
+            result = aLimbs
+        } else {
+            // Perform unsigned right shift first
+            result = shiftRight256(aLimbs, by: shiftBits)
+
+            // For negative values, sign-extend by filling high bits with 1s
+            if isNegative {
+                let wordShift = shiftBits / 64
+                let bitShift = shiftBits % 64
+
+                // Words completely shifted out become all 1s
+                for i in 0..<wordShift {
+                    result[i] = 0xFFFFFFFFFFFFFFFF
+                }
+
+                // Partial word: fill upper bits with 1s for sign extension
+                if bitShift > 0 {
+                    result[wordShift] |= ~0 << (64 - bitShift)
+                }
+            }
+        }
+
+        state.stack.push(m31WordFromUInt64Limbs(result))
     }
 
     // MARK: - Memory Operations
@@ -726,9 +888,19 @@ public final class EVMExecutionEngine: Sendable {
         let sizeInt = Int(UInt64(size.low32))
         state.memory.expand(offset: offsetInt, size: sizeInt)
 
-        // TODO: Actually compute Keccak-256 via zkmetal's Keccak engine
-        // For now, return a placeholder
-        state.stack.push(.zero)
+        // Extract memory region as bytes
+        var memoryBytes = [UInt8]()
+        memoryBytes.reserveCapacity(sizeInt)
+        for i in 0..<sizeInt {
+            memoryBytes.append(state.memory.loadByte(offset: offsetInt + i))
+        }
+
+        // Compute Keccak-256 hash using zkMetal's CPU implementation
+        let hashBytes = zkMetal.keccak256(memoryBytes)
+
+        // Convert 32-byte hash to M31Word (big-endian byte order)
+        let resultWord = M31Word(bytes: hashBytes)
+        state.stack.push(resultWord)
     }
 
     // MARK: - Environmental

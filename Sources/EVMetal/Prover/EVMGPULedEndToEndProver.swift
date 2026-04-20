@@ -189,7 +189,7 @@ public final class EVMGPULedEndToEndProver {
             let ptr = buf.contents().bindMemory(to: UInt32.self, capacity: evalLen)
             var col = [M31](repeating: .zero, count: evalLen)
             for i in 0..<evalLen {
-                col[i] = M31(reduced: ptr[i])
+                col[i] = M31(v: ptr[i])
             }
             traceLDEs.append(col)
         }

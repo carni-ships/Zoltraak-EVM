@@ -392,7 +392,7 @@ public final class EVMGPUOnlyCommitmentPipeline {
             var leaves: [M31] = []
             leaves.reserveCapacity(count)
             for i in 0..<count {
-                leaves.append(M31(reduced: ptr[i]))
+                leaves.append(M31(v: ptr[i]))
             }
             hashedLeaves.append(leaves)
         }

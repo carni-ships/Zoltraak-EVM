@@ -418,7 +418,7 @@ public final class GPUProverMultiStream: Sendable {
             let outPtr = traceBuffer.contents().bindMemory(to: UInt32.self, capacity: column.count)
             var outputColumn = [M31]()
             for i in 0..<column.count {
-                outputColumn.append(M31(reduced: outPtr[i]))
+                outputColumn.append(M31(v: outPtr[i]))
             }
             result.append(outputColumn)
 

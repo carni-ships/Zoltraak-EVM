@@ -121,8 +121,8 @@ public final class EVMGPUMerkleEngine {
     }
 
     private static func compileUpperBatchShaders(device: MTLDevice) throws -> MTLLibrary {
-        // Find our local shader file
-        let shaderPath = "/Users/carnation/Documents/Claude/EVMetal/Sources/EVMetal/Shaders/hash/poseidon2_m31_merkle_tree.metal"
+        let shaderDir = Self.findShaderDir()
+        let shaderPath = shaderDir + "/poseidon2_m31_merkle_tree.metal"
         guard FileManager.default.fileExists(atPath: shaderPath) else {
             throw GPUProverError.missingKernel
         }
@@ -131,6 +131,31 @@ public final class EVMGPUMerkleEngine {
         options.fastMathEnabled = true
         options.languageVersion = .version2_0
         return try device.makeLibrary(source: source, options: options)
+    }
+
+    /// Find the shader directory by searching standard locations.
+    private static func findShaderDir() -> String {
+        let execPath = CommandLine.arguments[0]
+        let execDir = (execPath as NSString).deletingLastPathComponent
+        for bundle in Bundle.allBundles {
+            if let url = bundle.url(forResource: "Shaders", withExtension: nil) {
+                let path = url.appendingPathComponent("hash").path
+                if FileManager.default.fileExists(atPath: path + "/poseidon2_m31_merkle_tree.metal") {
+                    return path
+                }
+            }
+        }
+        let candidates = [
+            "\(execDir)/../Sources/EVMetal/Shaders",
+            execDir + "/../Sources/EVMetal/Shaders",
+            "./Sources/EVMetal/Shaders",
+        ]
+        for path in candidates {
+            if FileManager.default.fileExists(atPath: "\(path)/hash/poseidon2_m31_merkle_tree.metal") {
+                return path + "/hash"
+            }
+        }
+        return execDir + "/../Sources/EVMetal/Shaders"
     }
 
     /// Build multiple Merkle trees from pre-hashed leaves on GPU
@@ -217,7 +242,7 @@ public final class EVMGPUMerkleEngine {
 
         enc.endEncoding()
         cmdBuf.commit()
-        cmdBuf.waitUntilCompleted()
+        try waitAndCheckError(cmdBuf, operation: "buildTreesBatch: fuse")
 
         // Read results
         let outPtr = outputBuf.contents().bindMemory(to: UInt32.self, capacity: numTrees * nodeSize)
@@ -228,7 +253,7 @@ public final class EVMGPUMerkleEngine {
             var rootValues = [M31]()
             rootValues.reserveCapacity(nodeSize)
             for j in 0..<nodeSize {
-                rootValues.append(M31(reduced: outPtr[i * nodeSize + j]))
+                rootValues.append(M31(v: outPtr[i * nodeSize + j]))
             }
             roots.append(zkMetal.M31Digest(values: rootValues))
         }
@@ -337,7 +362,7 @@ public final class EVMGPUMerkleEngine {
 
         enc.endEncoding()
         cmdBuf.commit()
-        cmdBuf.waitUntilCompleted()
+        try waitAndCheckError(cmdBuf, operation: "buildTreesBatchLarge: loop")
 
         // Step 5: Read final roots
         let outPtr = srcBuf.contents().bindMemory(to: UInt32.self, capacity: numTrees * nodeSize)
@@ -348,7 +373,7 @@ public final class EVMGPUMerkleEngine {
             var rootValues = [M31]()
             rootValues.reserveCapacity(nodeSize)
             for j in 0..<nodeSize {
-                rootValues.append(M31(reduced: outPtr[i * nodeSize + j]))
+                rootValues.append(M31(v: outPtr[i * nodeSize + j]))
             }
             roots.append(zkMetal.M31Digest(values: rootValues))
         }
@@ -472,7 +497,7 @@ public final class EVMGPUMerkleEngine {
 
         enc.endEncoding()
         cmdBuf.commit()
-        cmdBuf.waitUntilCompleted()
+        try waitAndCheckError(cmdBuf, operation: "buildTreesWithSubtrees: upper levels")
 
         // Step 5: Read final roots from GPU buffer
         let outPtr = srcBuf.contents().bindMemory(to: UInt32.self, capacity: numTrees * nodeSize)
@@ -483,7 +508,7 @@ public final class EVMGPUMerkleEngine {
             var rootValues = [M31]()
             rootValues.reserveCapacity(nodeSize)
             for j in 0..<nodeSize {
-                rootValues.append(M31(reduced: outPtr[i * nodeSize + j]))
+                rootValues.append(M31(v: outPtr[i * nodeSize + j]))
             }
             roots.append(zkMetal.M31Digest(values: rootValues))
         }
@@ -516,6 +541,7 @@ public enum GPUProverError: Error {
     case noCommandBuffer
     case missingKernel
     case gpuError(String)
+    case commandBufferError(String)
 
     public var description: String {
         switch self {
@@ -529,6 +555,26 @@ public enum GPUProverError: Error {
             return "Metal kernel not found"
         case .gpuError(let msg):
             return "GPU error: \(msg)"
+        case .commandBufferError(let msg):
+            return "GPU command buffer error: \(msg)"
         }
+    }
+}
+
+// MARK: - GPU Command Buffer Helpers
+
+/// Waits for a command buffer to complete and checks for errors.
+/// - Throws: GPUProverError.commandBufferError if the GPU operation failed
+private func waitAndCheckError(_ commandBuffer: MTLCommandBuffer, operation: String) throws {
+    commandBuffer.waitUntilCompleted()
+    if let error = commandBuffer.error {
+        let errorDescription: String
+        if let gpuError = error as? NSError,
+           let underlying = gpuError.userInfo["NSErrorUnderlyingErrorKey"] as? String {
+            errorDescription = underlying
+        } else {
+            errorDescription = error.localizedDescription
+        }
+        throw GPUProverError.commandBufferError("\(operation): \(errorDescription)")
     }
 }

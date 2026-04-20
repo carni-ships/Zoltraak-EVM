@@ -245,7 +245,7 @@ public final class EVMetalLeafHashEngine {
         var digests = [M31]()
         digests.reserveCapacity(count * 8)
         for i in 0..<(count * 8) {
-            digests.append(M31(reduced: ptr[i]))
+            digests.append(M31(v: ptr[i]))
         }
 
         return digests
@@ -364,7 +364,7 @@ public final class EVMetalLeafHashEngine {
                     throw GPUProverError.gpuError("Index out of bounds: baseIdx=\(baseIdx), resultsCount=\(resultsCount)")
                 }
                 for j in 0..<8 {
-                    columnDigests.append(M31(reduced: ptr[baseIdx + j]))
+                    columnDigests.append(M31(v: ptr[baseIdx + j]))
                 }
             }
             results.append(columnDigests)
@@ -481,7 +481,7 @@ public final class EVMetalLeafHashEngine {
         results.reserveCapacity(totalCount * 8)
 
         for i in 0..<(totalCount * 8) {
-            results.append(M31(reduced: ptr[i]))
+            results.append(M31(v: ptr[i]))
         }
 
         // Return input buffers to pool for reuse
@@ -645,7 +645,7 @@ public final class EVMetalLeafHashEngine {
             for i in 0..<countPerColumn {
                 let baseIdx = (colBase + i) * 8
                 for j in 0..<8 {
-                    columnDigests.append(M31(reduced: ptr[baseIdx + j]))
+                    columnDigests.append(M31(v: ptr[baseIdx + j]))
                 }
             }
             results.append(columnDigests)
@@ -759,7 +759,7 @@ public final class EVMetalLeafHashEngine {
             for i in 0..<countPerColumn {
                 let baseIdx = (colBase + i) * 8
                 for j in 0..<8 {
-                    columnDigests.append(M31(reduced: ptr[baseIdx + j]))
+                    columnDigests.append(M31(v: ptr[baseIdx + j]))
                 }
             }
             results.append(columnDigests)
@@ -881,7 +881,7 @@ public final class EVMetalLeafHashEngine {
             for i in 0..<countPerColumn {
                 let baseIdx = (colBase + i) * 8
                 for j in 0..<8 {
-                    columnDigests.append(M31(reduced: ptr[baseIdx + j]))
+                    columnDigests.append(M31(v: ptr[baseIdx + j]))
                 }
             }
             results.append(columnDigests)

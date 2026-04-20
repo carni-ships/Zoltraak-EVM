@@ -539,7 +539,7 @@ public final class EVMetalCustomProver {
         var rootValues = [M31]()
         rootValues.reserveCapacity(nodeSize)
         for i in 0..<nodeSize {
-            rootValues.append(M31(reduced: outPtr[i]))
+            rootValues.append(M31(v: outPtr[i]))
         }
 
         return zkMetal.M31Digest(values: rootValues)

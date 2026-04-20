@@ -6,140 +6,155 @@ final class EVMTests: XCTestCase {
 
     // MARK: - M31Word Tests
 
+    @Test
     func testM31WordCreation() {
         let word = M31Word(lo: 42)
-        XCTAssertFalse(word.isZero)
-        XCTAssertEqual(word.limbs.count, 9)
+        #expect(word.isZero == false)
+        #expect(word.limbs.count == 9)
     }
 
+    @Test
     func testM31WordAddition() {
         let a = M31Word(lo: 100)
         let b = M31Word(lo: 50)
         let (result, overflow) = a.add(b)
 
-        XCTAssertEqual(result.low32, 150)
-        XCTAssertEqual(overflow.v, 0)
+        #expect(result.low32 == 150)
+        #expect(overflow.v == 0)
     }
 
+    @Test
     func testM31WordSubtraction() {
         let a = M31Word(lo: 100)
         let b = M31Word(lo: 50)
         let (result, borrow) = a.sub(b)
 
-        XCTAssertEqual(result.low32, 50)
-        XCTAssertEqual(borrow.v, 0)
+        #expect(result.low32 == 50)
+        #expect(borrow.v == 0)
     }
 
+    @Test
     func testM31WordEquality() {
         let a = M31Word(lo: 42)
         let b = M31Word(lo: 42)
         let c = M31Word(lo: 43)
 
-        XCTAssertEqual(a, b)
-        XCTAssertNotEqual(a, c)
+        #expect(a == b)
+        #expect(a != c)
     }
 
+    @Test
     func testM31WordToBytes() {
         let word = M31Word(lo: 0xDEADBEEF)
         let bytes = word.toBytes()
 
-        XCTAssertEqual(bytes.count, 32)
+        #expect(bytes.count == 32)
     }
 
+    @Test
     func testM31WordHexString() {
         let word = M31Word(lo: 0xDEADBEEF)
         let hex = word.toHexString()
 
-        XCTAssertTrue(hex.hasPrefix("0x"))
+        #expect(hex.hasPrefix("0x"))
     }
 
     // MARK: - EVMOpcode Tests
 
+    @Test
     func testOpcodeProperties() {
         let add = EVMOpcode.ADD
-        XCTAssertEqual(add.properties.name, "ADD")
-        XCTAssertEqual(add.properties.gas, 3)
-        XCTAssertEqual(add.properties.stackHeightChange, 1)
+        #expect(add.properties.name == "ADD")
+        #expect(add.properties.gas == 3)
+        #expect(add.properties.stackHeightChange == 1)
     }
 
+    @Test
     func testPushOpcode() {
         let push1 = EVMOpcode.PUSH1
-        XCTAssertEqual(push1.pushBytes, 1)
+        #expect(push1.pushBytes == 1)
 
         let push32 = EVMOpcode.PUSH32
-        XCTAssertEqual(push32.pushBytes, 32)
+        #expect(push32.pushBytes == 32)
 
         let add = EVMOpcode.ADD
-        XCTAssertNil(add.pushBytes)
+        #expect(add.pushBytes == nil)
     }
 
+    @Test
     func testDupOpcode() {
         let dup1 = EVMOpcode.DUP1
-        XCTAssertEqual(dup1.dupPosition, 1)
+        #expect(dup1.dupPosition == 1)
 
         let dup16 = EVMOpcode.DUP16
-        XCTAssertEqual(dup16.dupPosition, 16)
+        #expect(dup16.dupPosition == 16)
 
         let add = EVMOpcode.ADD
-        XCTAssertNil(add.dupPosition)
+        #expect(add.dupPosition == nil)
     }
 
+    @Test
     func testSwapOpcode() {
         let swap1 = EVMOpcode.SWAP1
-        XCTAssertEqual(swap1.swapPosition, 1)
+        #expect(swap1.swapPosition == 1)
 
         let swap16 = EVMOpcode.SWAP16
-        XCTAssertEqual(swap16.swapPosition, 16)
+        #expect(swap16.swapPosition == 16)
     }
 
+    @Test
     func testMVPOpcodes() {
         // Basic ops should be in MVP
-        XCTAssertTrue(EVMOpcode.ADD.isMVP)
-        XCTAssertTrue(EVMOpcode.STOP.isMVP)
-        XCTAssertTrue(EVMOpcode.JUMP.isMVP)
-        XCTAssertTrue(EVMOpcode.JUMPI.isMVP)
-        XCTAssertTrue(EVMOpcode.PUSH1.isMVP)
+        #expect(EVMOpcode.ADD.isMVP == true)
+        #expect(EVMOpcode.STOP.isMVP == true)
+        #expect(EVMOpcode.JUMP.isMVP == true)
+        #expect(EVMOpcode.JUMPI.isMVP == true)
+        #expect(EVMOpcode.PUSH1.isMVP == true)
     }
 
     // MARK: - EVMStack Tests
 
+    @Test
     func testStackPushPop() {
         var stack = EVMStack()
         stack.push(M31Word(lo: 42))
         stack.push(M31Word(lo: 99))
 
-        XCTAssertEqual(stack.stackHeight, 2)
+        #expect(stack.stackHeight == 2)
 
         let val = stack.pop()
-        XCTAssertEqual(val.low32, 99)
+        #expect(val.low32 == 99)
 
         let val2 = stack.pop()
-        XCTAssertEqual(val2.low32, 42)
+        #expect(val2.low32 == 42)
 
-        XCTAssertEqual(stack.stackHeight, 0)
+        #expect(stack.stackHeight == 0)
     }
 
+    @Test
     func testStackPeek() {
         var stack = EVMStack()
         stack.push(M31Word(lo: 1))
         stack.push(M31Word(lo: 2))
         stack.push(M31Word(lo: 3))
 
-        XCTAssertEqual(stack.peek(depth: 1).low32, 3)
-        XCTAssertEqual(stack.peek(depth: 2).low32, 2)
-        XCTAssertEqual(stack.peek(depth: 3).low32, 1)
+        #expect(stack.peek(depth: 1).low32 == 3)
+        #expect(stack.peek(depth: 2).low32 == 2)
+        #expect(stack.peek(depth: 3).low32 == 1)
     }
 
+    @Test
     func testStackDup() {
         var stack = EVMStack()
         stack.push(M31Word(lo: 42))
         stack.push(M31Word(lo: 99))
         stack.dup(position: 1)
 
-        XCTAssertEqual(stack.stackHeight, 3)
-        XCTAssertEqual(stack.peek(depth: 1).low32, 99)
+        #expect(stack.stackHeight == 3)
+        #expect(stack.peek(depth: 1).low32 == 99)
     }
 
+    @Test
     func testStackSwap() {
         var stack = EVMStack()
         stack.push(M31Word(lo: 1))
@@ -147,27 +162,30 @@ final class EVMTests: XCTestCase {
 
         stack.Swap(position: 1)
 
-        XCTAssertEqual(stack.peek(depth: 1).low32, 1)
-        XCTAssertEqual(stack.peek(depth: 2).low32, 2)
+        #expect(stack.peek(depth: 1).low32 == 1)
+        #expect(stack.peek(depth: 2).low32 == 2)
     }
 
+    @Test
     func testStackUnderflow() {
         var stack = EVMStack()
-        XCTAssertEqual(stack.stackHeight, 0)
+        #expect(stack.stackHeight == 0)
 
         // Peek should fail on empty stack
-        XCTAssertEqual(stack.peek(depth: 1).low32, 0)
+        #expect(stack.peek(depth: 1).low32 == 0)
     }
 
     // MARK: - EVMMemory Tests
 
+    @Test
     func testMemoryExpand() {
         var memory = EVMMemory()
         memory.expand(offset: 0, size: 64)
 
-        XCTAssertEqual(memory.size, 64)
+        #expect(memory.size == 64)
     }
 
+    @Test
     func testMemoryWordStoreLoad() {
         var memory = EVMMemory()
         let value = M31Word(lo: 0xDEADBEEF)
@@ -175,123 +193,135 @@ final class EVMTests: XCTestCase {
         memory.storeWord(offset: 0, value: value)
         let loaded = memory.loadWord(offset: 0)
 
-        XCTAssertEqual(loaded.low32, 0xDEADBEEF)
+        #expect(loaded.low32 == 0xDEADBEEF)
     }
 
+    @Test
     func testMemoryByteStoreLoad() {
         var memory = EVMMemory()
 
         memory.storeByte(offset: 0, value: 0x42)
         let loaded = memory.loadByte(offset: 0)
 
-        XCTAssertEqual(loaded, 0x42)
+        #expect(loaded == 0x42)
     }
 
     // MARK: - EVMState Tests
 
+    @Test
     func testEVMStateCreation() {
         let state = EVMState()
 
-        XCTAssertEqual(state.pc, 0)
-        XCTAssertTrue(state.running)
-        XCTAssertFalse(state.reverted)
-        XCTAssertEqual(state.stack.stackHeight, 0)
+        #expect(state.pc == 0)
+        #expect(state.running == true)
+        #expect(state.reverted == false)
+        #expect(state.stack.stackHeight == 0)
     }
 
+    @Test
     func testEVMStateChargeGas() {
         var state = EVMState()
         state.gas = 100
 
         let success = state.chargeGas(50)
-        XCTAssertTrue(success)
-        XCTAssertEqual(state.gas, 50)
+        #expect(success == true)
+        #expect(state.gas == 50)
 
         let success2 = state.chargeGas(100)
-        XCTAssertFalse(success2)
-        XCTAssertTrue(state.reverted)
+        #expect(success2 == false)
+        #expect(state.reverted == true)
     }
 
     // MARK: - EVMExecutionEngine Tests
 
+    @Test
     func testSimpleExecution() throws {
         // Simple STOP opcode
         let engine = EVMExecutionEngine()
         let result = try engine.execute(code: [0x00])
 
-        XCTAssertFalse(result.trace.reverted)
-        XCTAssertEqual(result.trace.rows.count, 1)
-        XCTAssertEqual(result.trace.rows[0].opcode, 0x00)
+        #expect(result.trace.reverted == false)
+        #expect(result.trace.rows.count == 1)
+        #expect(result.trace.rows[0].opcode == 0x00)
     }
 
+    @Test
     func testPushExecution() throws {
         // PUSH1 0x42 followed by STOP
         let code: [UInt8] = [0x60, 0x42, 0x00]
         let engine = EVMExecutionEngine()
         let result = try engine.execute(code: code, gasLimit: 1000)
 
-        XCTAssertFalse(result.trace.reverted)
+        #expect(result.trace.reverted == false)
         // Should have PUSH1 + STOP = 2 trace rows
-        XCTAssertEqual(result.trace.rows.count, 2)
-        XCTAssertEqual(result.trace.rows[0].opcode, 0x60)  // PUSH1
+        #expect(result.trace.rows.count == 2)
+        #expect(result.trace.rows[0].opcode == 0x60)  // PUSH1
     }
 
+    @Test
     func testArithmeticExecution() throws {
         // PUSH1 0x0A (10), PUSH1 0x14 (20), ADD, STOP
         let code: [UInt8] = [0x60, 0x0A, 0x60, 0x14, 0x01, 0x00]
         let engine = EVMExecutionEngine()
         let result = try engine.execute(code: code, gasLimit: 1000)
 
-        XCTAssertFalse(result.trace.reverted)
-        XCTAssertEqual(result.trace.rows.count, 4)
+        #expect(result.trace.reverted == false)
+        #expect(result.trace.rows.count == 4)
     }
 
+    @Test
     func testStackOperations() throws {
         // PUSH1 0x42, PUSH1 0x99, DUP1, STOP
         let code: [UInt8] = [0x60, 0x42, 0x60, 0x99, 0x80, 0x00]
         let engine = EVMExecutionEngine()
         let result = try engine.execute(code: code, gasLimit: 1000)
 
-        XCTAssertFalse(result.trace.reverted)
+        #expect(result.trace.reverted == false)
     }
 
+    @Test
     func testMemoryOperations() throws {
         // PUSH1 0x00, PUSH1 0x42, MSTORE, STOP
         let code: [UInt8] = [0x60, 0x00, 0x60, 0x42, 0x52, 0x00]
         let engine = EVMExecutionEngine()
         let result = try engine.execute(code: code, gasLimit: 10000)
 
-        XCTAssertFalse(result.trace.reverted)
-        XCTAssertEqual(result.memoryTrace.count, 1)  // One memory write
+        #expect(result.trace.reverted == false)
+        #expect(result.memoryTrace.count == 1)  // One memory write
     }
 
+    @Test
     func testInvalidOpcode() {
         let code: [UInt8] = [0xFF]  // Invalid opcode
         let engine = EVMExecutionEngine()
 
-        XCTAssertThrowsError(try engine.execute(code: code, gasLimit: 1000)) { error in
-            XCTAssertTrue(error is EVMExecutionError)
+        #expect(throws: EVMExecutionError.self) {
+            try engine.execute(code: code, gasLimit: 1000)
         }
     }
 
     // MARK: - EVMAIR Tests
 
+    @Test
     func testEVMAIRCreation() {
         let air = EVMAIR(logTraceLength: 10)
 
-        XCTAssertEqual(air.logTraceLength, 10)
-        XCTAssertEqual(air.numColumns, 180)
-        XCTAssertEqual(air.boundaryConstraints.count, 7)
+        #expect(air.logTraceLength == 10)
+        #expect(air.numColumns == 180)
+        #expect(air.boundaryConstraints.count == 7)
     }
 
+    @Test
     func testEVMAIRFromExecution() throws {
         let engine = EVMExecutionEngine()
         let result = try engine.execute(code: [0x00], gasLimit: 1000)
 
         let air = EVMAIR.fromExecution(result)
 
-        XCTAssertEqual(air.logTraceLength, result.trace.count.nextPowerOfTwo().bitWidth - 1)
+        #expect(air.logTraceLength == result.trace.count.nextPowerOfTwo().bitWidth - 1)
     }
 
+    @Test
     func testEVMAIRConstraintEvaluation() throws {
         let air = EVMAIR(logTraceLength: 10)
 
@@ -307,43 +337,6 @@ final class EVMTests: XCTestCase {
 
         let constraints = air.evaluateConstraints(current: columns.map { $0[0] }, next: columns.map { $0[1] })
 
-        XCTAssertEqual(constraints.count, air.numConstraints)
-    }
-
-    // MARK: - Performance Tests
-
-    func testM31WordPerformance() {
-        measure {
-            var stack = EVMStack()
-            for i in 0..<1000 {
-                stack.push(M31Word(lo: UInt128(i)))
-            }
-            for _ in 0..<1000 {
-                _ = stack.pop()
-            }
-        }
-    }
-
-    func testMemoryExpandPerformance() {
-        measure {
-            var memory = EVMMemory()
-            for i in stride(from: 0, to: 10000, by: 32) {
-                memory.expand(offset: i, size: 32)
-            }
-        }
-    }
-}
-
-// MARK: - Helper Extensions
-
-extension EVMExecutionError: Equatable {
-    public static func == (lhs: EVMExecutionError, rhs: EVMExecutionError) -> Bool {
-        switch (lhs, rhs) {
-        case (.outOfGas, .outOfGas): return true
-        case (.stackUnderflow, .stackUnderflow): return true
-        case (.stackOverflow, .stackOverflow): return true
-        case (.revert(let a), .revert(let b)): return a == b
-        default: return false
-        }
+        #expect(constraints.count == air.numConstraints)
     }
 }

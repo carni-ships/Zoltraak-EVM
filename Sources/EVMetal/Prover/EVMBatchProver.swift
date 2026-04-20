@@ -835,7 +835,8 @@ extension EVMAIR {
     public static func fromExecution(_ result: EVMExecutionResult) -> EVMAIR {
         let traceLength = result.trace.rows.count
         let n = traceLength.nextPowerOfTwo()
-        let logLength = max(10, (64 - n.leadingZeroBitCount - 1))
+        // Compute log2 directly: n = 2^logLength for power-of-2 n
+        let logLength = n > 0 ? (64 - n.leadingZeroBitCount - 1) : 0
 
         return EVMAIR(
             logTraceLength: logLength,

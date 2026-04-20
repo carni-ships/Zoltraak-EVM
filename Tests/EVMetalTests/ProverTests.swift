@@ -6,6 +6,7 @@ final class ProverTests: XCTestCase {
 
     // MARK: - GPU vs CPU Leaf Hashing Correctness
 
+    @Test
     func testGPUvsCPULoadDigestCorrectness() throws {
         // Test that GPU leaf hashing matches CPU leaf hashing
         // This is the core correctness check for EVMetalLeafHashEngine
@@ -29,7 +30,7 @@ final class ProverTests: XCTestCase {
         let gpuDigests = try gpuEngine.hashLeavesWithPosition(values: values, positions: positions)
 
         // Compare
-        XCTAssertEqual(cpuDigests.count, gpuDigests.count, "Digest counts must match")
+        #expect(cpuDigests.count == gpuDigests.count)
 
         var allMatch = true
         var firstMismatchIdx: Int?
@@ -49,9 +50,10 @@ final class ProverTests: XCTestCase {
             print("First mismatch: leaf=\(leafIdx), element=\(elemIdx), value=\(values[leafIdx].v), position=\(positions[leafIdx])")
         }
 
-        XCTAssertTrue(allMatch, "GPU and CPU digests must match")
+        #expect(allMatch)
     }
 
+    @Test
     func testGPUvsCPULoadDigestBatchPerColumnCorrectness() throws {
         // Test batch per-column hashing
 
@@ -82,20 +84,21 @@ final class ProverTests: XCTestCase {
         )
 
         // Compare
-        XCTAssertEqual(cpuResults.count, gpuResults.count, "Column counts must match")
+        #expect(cpuResults.count == gpuResults.count)
 
         for col in 0..<numColumns {
-            XCTAssertEqual(cpuResults[col].count, gpuResults[col].count, "Column \(col) size must match")
+            #expect(cpuResults[col].count == gpuResults[col].count)
 
             for i in 0..<cpuResults[col].count {
                 if cpuResults[col][i].v != gpuResults[col][i].v {
                     print("Mismatch at column \(col), index \(i): CPU=\(String(format:"0x%08X", cpuResults[col][i].v)) GPU=\(String(format:"0x%08X", gpuResults[col][i].v))")
-                    XCTFail("GPU and CPU digests must match for column \(col)")
+                    Issue.record("GPU and CPU digests must match for column \(col)")
                 }
             }
         }
     }
 
+    @Test
     func testGPUvsCPUMerkleTreeRoot() throws {
         // Test that GPU and CPU produce the same Merkle tree root
 
@@ -115,8 +118,7 @@ final class ProverTests: XCTestCase {
 
         // Compare root values
         for i in 0..<8 {
-            XCTAssertEqual(cpuRoot.values[i].v, gpuRoot.values[i].v,
-                          "Root element \(i) must match: CPU=\(String(format:"0x%08X", cpuRoot.values[i].v)) GPU=\(String(format:"0x%08X", gpuRoot.values[i].v))")
+            #expect(cpuRoot.values[i].v == gpuRoot.values[i].v)
         }
 
         print("CPU Root: \(cpuRoot.values.map { String(format:"0x%08X", $0.v) }.joined(separator: ", "))")
@@ -125,6 +127,7 @@ final class ProverTests: XCTestCase {
 
     // MARK: - GPU Prover Tests
 
+    @Test
     func testEVMGPUMerkleEngineBasic() throws {
         let engine = try EVMGPUMerkleEngine()
 
@@ -136,10 +139,11 @@ final class ProverTests: XCTestCase {
 
         let root = try engine.buildTree(leaves: leaves)
 
-        XCTAssertEqual(root.values.count, 8)
+        #expect(root.values.count == 8)
         print("GPU Merkle root: \(root.values.map { String(format:"0x%08X", $0.v) }.joined(separator: ", "))")
     }
 
+    @Test
     func testEVMGPUMerkleEngineBatch() throws {
         let engine = try EVMGPUMerkleEngine()
 
@@ -158,7 +162,7 @@ final class ProverTests: XCTestCase {
 
         let roots = try engine.buildTreesBatch(treesLeaves: treesLeaves)
 
-        XCTAssertEqual(roots.count, numTrees)
+        #expect(roots.count == numTrees)
         for (i, root) in roots.enumerated() {
             print("Tree \(i) root: \(root.values.map { String(format:"0x%08X", $0.v) }.joined(separator: ", "))")
         }
@@ -166,6 +170,7 @@ final class ProverTests: XCTestCase {
 
     // MARK: - CPU Prover Tests
 
+    @Test
     func testCPUMerkleProverBasic() throws {
         let prover = EVMetalCPUMerkleProver()
 
@@ -176,10 +181,11 @@ final class ProverTests: XCTestCase {
 
         let root = prover.buildMerkleTree(values: values, numLeaves: 256)
 
-        XCTAssertEqual(root.values.count, 8)
+        #expect(root.values.count == 8)
         print("CPU Merkle root: \(root.values.map { String(format:"0x%08X", $0.v) }.joined(separator: ", "))")
     }
 
+    @Test
     func testCPUMerkleProverBatchPerColumn() throws {
         let prover = EVMetalCPUMerkleProver()
 
@@ -198,9 +204,9 @@ final class ProverTests: XCTestCase {
             countPerColumn: countPerColumn
         )
 
-        XCTAssertEqual(results.count, numColumns)
+        #expect(results.count == numColumns)
         for col in 0..<numColumns {
-            XCTAssertEqual(results[col].count, countPerColumn * 8)
+            #expect(results[col].count == countPerColumn * 8)
         }
     }
 }
