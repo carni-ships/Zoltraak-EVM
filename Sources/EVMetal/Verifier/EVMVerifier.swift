@@ -1,0 +1,300 @@
+import Foundation
+import zkMetal
+
+/// Verification result
+public enum EVMVerificationResult {
+    case valid
+    case invalid(reason: String)
+    case error(Error)
+
+    public var isValid: Bool {
+        if case .valid = self { return true }
+        return false
+    }
+
+    public var description: String {
+        switch self {
+        case .valid:
+            return "Proof is valid"
+        case .invalid(let reason):
+            return "Proof is invalid: \(reason)"
+        case .error(let error):
+            return "Verification error: \(error.localizedDescription)"
+        }
+    }
+}
+
+/// Verification statistics
+public struct EVMVerificationStats {
+    /// Total verification time in milliseconds
+    public let verificationTimeMs: Double
+
+    /// Number of queries verified
+    public let queriesVerified: Int
+
+    /// Number of trace columns verified
+    public let traceColumnsVerified: Int
+
+    /// FRI rounds verified
+    public let friRoundsVerified: Int
+
+    public init(verificationTimeMs: Double, queriesVerified: Int, traceColumnsVerified: Int, friRoundsVerified: Int) {
+        self.verificationTimeMs = verificationTimeMs
+        self.queriesVerified = queriesVerified
+        self.traceColumnsVerified = traceColumnsVerified
+        self.friRoundsVerified = friRoundsVerified
+    }
+}
+
+/// EVM-specific verifier using CircleSTARK
+public final class EVMVerifier: Sendable {
+
+    /// The underlying CircleSTARK verifier
+    private let circleVerifier: CircleSTARKVerifier
+
+    /// Verification options
+    public struct Options: Sendable {
+        /// Enable detailed logging
+        public let verbose: Bool
+
+        /// Maximum verification time in seconds (0 = no limit)
+        public let timeoutSeconds: Double
+
+        /// Check proof structure before full verification
+        public let checkStructure: Bool
+
+        public init(verbose: Bool = false, timeoutSeconds: Double = 0, checkStructure: Bool = true) {
+            self.verbose = verbose
+            self.timeoutSeconds = timeoutSeconds
+            self.checkStructure = checkStructure
+        }
+
+        public static let `default` = Options()
+        public static let strict = Options(verbose: true, checkStructure: true)
+    }
+
+    private let options: Options
+
+    public init(options: Options = .default) {
+        self.options = options
+        self.circleVerifier = CircleSTARKVerifier()
+    }
+
+    // MARK: - Verification
+
+    /// Verify a single transaction proof
+    public func verify(proof: CircleSTARKProof, logTraceLength: Int, initialStateRoot: M31Word = .zero) -> EVMVerificationResult {
+        let startTime = CFAbsoluteTimeGetCurrent()
+
+        // Create the AIR for verification
+        let air = EVMAIR(logTraceLength: logTraceLength, initialStateRoot: initialStateRoot)
+
+        do {
+            if options.verbose {
+                print("Starting verification...")
+                print("  Trace length: \(1 << logTraceLength)")
+                print("  Columns: \(air.numColumns)")
+                print("  Proof size: \(proof.proofSizeDescription)")
+            }
+
+            // Verify the proof
+            let valid = try circleVerifier.verify(air: air, proof: proof)
+
+            let elapsedMs = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
+
+            if options.verbose {
+                print("Verification completed in \(String(format: "%.2f", elapsedMs))ms")
+            }
+
+            return valid ? .valid : .invalid(reason: "Verifier returned false")
+        } catch let error as CircleSTARKError {
+            let elapsedMs = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
+            if options.verbose {
+                print("Verification failed after \(String(format: "%.2f", elapsedMs))ms")
+            }
+            return .invalid(reason: describeError(error))
+        } catch {
+            let elapsedMs = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
+            if options.verbose {
+                print("Verification error after \(String(format: "%.2f", elapsedMs))ms")
+            }
+            return .error(error)
+        }
+    }
+
+    /// Verify a batch proof
+    public func verifyBatch(proofs: [CircleSTARKProof], logTraceLength: Int) -> [EVMVerificationResult] {
+        var results: [EVMVerificationResult] = []
+        for (idx, proof) in proofs.enumerated() {
+            if options.verbose {
+                print("Verifying proof \(idx + 1)/\(proofs.count)...")
+            }
+            results.append(verify(proof: proof, logTraceLength: logTraceLength))
+        }
+        return results
+    }
+
+    /// Verify with detailed statistics
+    public func verifyWithStats(proof: CircleSTARKProof, logTraceLength: Int, initialStateRoot: M31Word = .zero) -> (result: EVMVerificationResult, stats: EVMVerificationStats) {
+        let startTime = CFAbsoluteTimeGetCurrent()
+
+        let result = verify(proof: proof, logTraceLength: logTraceLength, initialStateRoot: initialStateRoot)
+
+        let elapsedMs = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
+
+        let stats = EVMVerificationStats(
+            verificationTimeMs: elapsedMs,
+            queriesVerified: proof.queryResponses.count,
+            traceColumnsVerified: proof.traceCommitments.count,
+            friRoundsVerified: proof.friProof.rounds.count
+        )
+
+        return (result, stats)
+    }
+
+    // MARK: - Proof Validation
+
+    /// Perform structural checks on a proof without full verification
+    public func validateStructure(proof: CircleSTARKProof) -> Bool {
+        // Check trace commitments exist
+        guard !proof.traceCommitments.isEmpty else {
+            if options.verbose { print("No trace commitments") }
+            return false
+        }
+
+        // Check query responses exist
+        guard !proof.queryResponses.isEmpty else {
+            if options.verbose { print("No query responses") }
+            return false
+        }
+
+        // Check FRI proof structure
+        guard !proof.friProof.rounds.isEmpty else {
+            if options.verbose { print("No FRI rounds") }
+            return false
+        }
+
+        // Check composition commitment
+        guard proof.compositionCommitment.count == 32 else {
+            if options.verbose { print("Invalid composition commitment size") }
+            return false
+        }
+
+        if options.verbose {
+            print("Structure validation passed")
+            print("  Trace commitments: \(proof.traceCommitments.count)")
+            print("  Query responses: \(proof.queryResponses.count)")
+            print("  FRI rounds: \(proof.friProof.rounds.count)")
+        }
+
+        return true
+    }
+
+    // MARK: - Error Description
+
+    private func describeError(_ error: CircleSTARKError) -> String {
+        switch error {
+        case .invalidProof(let msg):
+            return "Invalid proof: \(msg)"
+        case .merkleVerificationFailed(let msg):
+            return "Merkle verification failed: \(msg)"
+        case .friVerificationFailed(let msg):
+            return "FRI verification failed: \(msg)"
+        case .constraintMismatch(let msg):
+            return "Constraint mismatch: \(msg)"
+        }
+    }
+}
+
+// MARK: - Convenience Extensions
+
+extension EVMVerifier {
+
+    /// Quick verification without logging
+    public static func quickVerify(proof: CircleSTARKProof, logTraceLength: Int) -> Bool {
+        let verifier = EVMVerifier()
+        let result = verifier.verify(proof: proof, logTraceLength: logTraceLength)
+        return result.isValid
+    }
+
+    /// Verify and print results
+    public static func verifyAndPrint(proof: CircleSTARKProof, logTraceLength: Int, label: String = "Proof") {
+        let verifier = EVMVerifier(options: .strict)
+        let result = verifier.verify(proof: proof, logTraceLength: logTraceLength)
+        print("[\(label)] \(result.description)")
+    }
+}
+
+// MARK: - Batch Verification Support
+
+/// Handles batch verification with aggregation
+public final class EVMBatchVerifier: Sendable {
+
+    private let singleVerifier: EVMVerifier
+
+    public init() {
+        self.singleVerifier = EVMVerifier(options: .default)
+    }
+
+    /// Verify all proofs in a batch
+    public func verifyBatch(batchProof: EVMBatchProof) -> BatchVerificationResult {
+        let startTime = CFAbsoluteTimeGetCurrent()
+
+        var results: [(index: Int, result: EVMVerificationResult)] = []
+        var validCount = 0
+        var invalidCount = 0
+
+        for (idx, proof) in batchProof.transactionProofs.enumerated() {
+            let result = singleVerifier.verify(
+                proof: proof,
+                logTraceLength: batchProof.batchConfig.logTraceLength
+            )
+            results.append((idx, result))
+            switch result {
+            case .valid:
+                validCount += 1
+            default:
+                invalidCount += 1
+            }
+        }
+
+        let elapsedMs = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
+
+        return BatchVerificationResult(
+            totalProofs: batchProof.transactionProofs.count,
+            validProofs: validCount,
+            invalidProofs: invalidCount,
+            verificationTimeMs: elapsedMs,
+            perProofResults: results
+        )
+    }
+}
+
+/// Result of batch verification
+public struct BatchVerificationResult {
+    public let totalProofs: Int
+    public let validProofs: Int
+    public let invalidProofs: Int
+    public let verificationTimeMs: Double
+    public let perProofResults: [(index: Int, result: EVMVerificationResult)]
+
+    public init(totalProofs: Int, validProofs: Int, invalidProofs: Int, verificationTimeMs: Double, perProofResults: [(index: Int, result: EVMVerificationResult)]) {
+        self.totalProofs = totalProofs
+        self.validProofs = validProofs
+        self.invalidProofs = invalidProofs
+        self.verificationTimeMs = verificationTimeMs
+        self.perProofResults = perProofResults
+    }
+
+    public var allValid: Bool {
+        return invalidProofs == 0
+    }
+
+    public var summary: String {
+        if allValid {
+            return "All \(totalProofs) proofs valid in \(String(format: "%.2f", verificationTimeMs))ms"
+        } else {
+            return "\(validProofs)/\(totalProofs) valid in \(String(format: "%.2f", verificationTimeMs))ms (\(invalidProofs) invalid)"
+        }
+    }
+}

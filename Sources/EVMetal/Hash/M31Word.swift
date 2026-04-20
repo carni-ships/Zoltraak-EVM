@@ -46,10 +46,10 @@ public struct M31Word: Equatable, Sendable {
                       UInt32(bytes[29 - 4*i]) << 16 |
                       UInt32(bytes[30 - 4*i]) << 8 |
                       UInt32(bytes[31 - 4*i])
-            result.append(M31(v: val))
+            result.append(M31(reduced: val))
         }
         // 9th limb (8 bits only)
-        result.append(M31(v: UInt32(bytes[0]) << 24 | UInt32(bytes[1]) << 16 | UInt32(bytes[2]) << 8 | UInt32(bytes[3])))
+        result.append(M31(reduced: UInt32(bytes[0]) << 24 | UInt32(bytes[1]) << 16 | UInt32(bytes[2]) << 8 | UInt32(bytes[3])))
 
         self.limbs = result
     }
@@ -63,6 +63,13 @@ public struct M31Word: Equatable, Sendable {
         limbs[0] = M31.one
         return M31Word(limbs: limbs)
     }()
+
+    /// Extract low 64 bits as UInt64
+    public var low64: UInt64 {
+        let lo = UInt64(limbs[0].v)
+        let hi = UInt64(limbs.count > 1 ? limbs[1].v : 0)
+        return lo | (hi << 32)
+    }
 
     // MARK: - Arithmetic
 
