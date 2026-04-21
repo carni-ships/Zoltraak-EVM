@@ -169,8 +169,8 @@ public final class EVMetalCustomProver {
         var allDigests: [[M31]] = []
 
         if let gpuEngine = leafHashEngine {
-            // GPU position hashing - EVMetalLeafHashEngine has the batch per-column method
-            allDigests = try gpuEngine.hashLeavesBatchPerColumn(
+            // GPU position hashing - use auto-optimized to select best kernel
+            allDigests = try gpuEngine.hashLeavesAutoOptimized(
                 allValues: traceLDEs.flatMap { $0 },
                 numColumns: numColumns,
                 countPerColumn: evalLen
@@ -240,8 +240,8 @@ public final class EVMetalCustomProver {
             flatValues.append(contentsOf: col)
         }
 
-        // Single GPU batch call for all columns (much faster than 180 sequential calls)
-        let allDigests = try engine.hashLeavesBatchPerColumn(
+        // Single GPU batch call for all columns using auto-optimized kernel
+        let allDigests = try engine.hashLeavesAutoOptimized(
             allValues: flatValues,
             numColumns: numColumns,
             countPerColumn: evalLen
