@@ -377,54 +377,19 @@ public final class EVMGPUOnlyCommitmentPipeline {
         )
         let hashMs = (CFAbsoluteTimeGetCurrent() - hashT0) * 1000
 
-        // === Phase 4: GPU Merkle Tree Building ===
+        // === Phase 4: GPU Merkle Tree Building (directly from GPU buffers - NO CPU READBACK!) ===
         let treeT0 = CFAbsoluteTimeGetCurrent()
 
         let subtreeMax = min(config.maxSubtreeLeaves, Poseidon2M31Engine.merkleSubtreeSize)
 
-        // Read back hashed buffers to CPU (single read per buffer)
-        var hashedLeaves: [[M31]] = []
-        hashedLeaves.reserveCapacity(hashedBuffers.count)
+        // PHASE 1 OPTIMIZATION: Pass GPU buffers directly to Merkle engine
+        // This eliminates the 12MB CPU-GPU transfer that was destroying performance!
+        let commitments = try merkleEngine.buildTreesFromGPUBuffers(
+            gpuBuffers: hashedBuffers,
+            numColumns: hashedBuffers.count,
+            evalLen: evalLen
+        )
 
-        for buf in hashedBuffers {
-            let count = evalLen * EVMGPUDirectHashEngine.digestSize
-            let ptr = buf.contents().bindMemory(to: UInt32.self, capacity: count)
-            var leaves: [M31] = []
-            leaves.reserveCapacity(count)
-            for i in 0..<count {
-                leaves.append(M31(v: ptr[i]))
-            }
-            hashedLeaves.append(leaves)
-        }
-
-        // Build Merkle trees
-        var commitments: [zkMetal.M31Digest] = []
-
-        if evalLen <= subtreeMax {
-            // All fit in one dispatch - use batch for maximum parallelism
-            commitments = try merkleEngine.buildTreesBatch(treesLeaves: hashedLeaves)
-        } else {
-            // Chunk into subtrees, then combine roots per column
-            let numSubtrees = evalLen / subtreeMax
-
-            // First build all subtree leaves arrays (still on CPU from readback)
-            var allSubtreeLeaves: [[M31]] = []
-            for colLeaves in hashedLeaves {
-                for subIdx in 0..<numSubtrees {
-                    let start = subIdx * subtreeMax * EVMGPUDirectHashEngine.digestSize
-                    let end = min(start + subtreeMax * EVMGPUDirectHashEngine.digestSize, colLeaves.count)
-                    allSubtreeLeaves.append(Array(colLeaves[start..<end]))
-                }
-            }
-
-            // Use GPU batch for all subtree roots + upper level tree building
-            // This keeps everything on GPU - no CPU hashing for subtree root combining
-            commitments = try merkleEngine.buildTreesWithSubtrees(
-                allSubtreeLeaves: allSubtreeLeaves,
-                numSubtreesPerTree: numSubtrees,
-                subtreeSize: subtreeMax
-            )
-        }
         let treeMs = (CFAbsoluteTimeGetCurrent() - treeT0) * 1000
 
         // Cleanup

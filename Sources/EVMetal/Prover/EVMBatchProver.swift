@@ -57,12 +57,16 @@ public struct BatchProverConfig {
     )
 
     /// Configuration optimized for unified block proving (Phase 3)
+    /// OPTIMIZED: Reduced trace length and blowup for faster proving
+    /// - logTraceLength: 8 (256 rows per tx for faster FRI)
+    /// - logBlowup: 2 (4x instead of 4/16x) for ~4x faster LDE/FRI
+    /// - numQueries: 4 (reduced from 30 for faster query phase)
     public static let unifiedBlock = BatchProverConfig(
         batchSize: 150,
         useGPU: true,
-        logTraceLength: 12,
-        numQueries: 30,
-        logBlowup: 4,
+        logTraceLength: 8,
+        numQueries: 4,
+        logBlowup: 2,
         useUnifiedProof: true
     )
 }

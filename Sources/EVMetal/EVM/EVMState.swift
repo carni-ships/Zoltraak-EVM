@@ -1,6 +1,99 @@
 import Foundation
 import zkMetal
 
+/// Account in the EVM state
+public struct Account: Sendable {
+    public var address: M31Word
+    public var balance: M31Word
+    public var code: [UInt8]
+    public var codeHash: M31Word  // keccak256(code)
+    public var nonce: UInt64
+
+    public init(address: M31Word, balance: M31Word = .zero, code: [UInt8] = [], nonce: UInt64 = 0) {
+        self.address = address
+        self.balance = balance
+        self.code = code
+        self.codeHash = code.isEmpty ? .zero : zkMetal.keccak256(code).toM31Word()
+        self.nonce = nonce
+    }
+
+    public mutating func setCode(_ newCode: [UInt8]) {
+        code = newCode
+        codeHash = newCode.isEmpty ? .zero : zkMetal.keccak256(newCode).toM31Word()
+    }
+}
+
+/// Account manager handling all EVM accounts
+public final class AccountManager: @unchecked Sendable {
+    public var accounts: [String: Account]
+    public var accessedAddresses: Set<String>
+
+    public init() {
+        self.accounts = [:]
+        self.accessedAddresses = []
+    }
+
+    public func getAccount(_ address: M31Word) -> Account? {
+        accounts[address.toHexString()]
+    }
+
+    public func getBalance(_ address: M31Word) -> M31Word {
+        accounts[address.toHexString()]?.balance ?? .zero
+    }
+
+    public func getCodeSize(_ address: M31Word) -> Int {
+        accounts[address.toHexString()]?.code.count ?? 0
+    }
+
+    public func getCodeHash(_ address: M31Word) -> M31Word {
+        accounts[address.toHexString()]?.codeHash ?? .zero
+    }
+
+    public func getCode(_ address: M31Word) -> [UInt8] {
+        accounts[address.toHexString()]?.code ?? []
+    }
+
+    public func isWarm(_ address: M31Word) -> Bool {
+        accessedAddresses.contains(address.toHexString())
+    }
+
+    public func markAccessed(_ address: M31Word) {
+        accessedAddresses.insert(address.toHexString())
+    }
+
+    public func createAccount(_ account: Account) {
+        accounts[account.address.toHexString()] = account
+    }
+
+    public func transferBalance(from: M31Word, to: M31Word, amount: M31Word) {
+        let fromHex = from.toHexString()
+        let toHex = to.toHexString()
+
+        if var fromAccount = accounts[fromHex] {
+            let (_, overflow) = fromAccount.balance.sub(amount)
+            if overflow.v == 0 {
+                fromAccount.balance = fromAccount.balance.sub(amount).result
+                accounts[fromHex] = fromAccount
+            }
+        }
+
+        if var toAccount = accounts[toHex] {
+            let (newBalance, _) = toAccount.balance.add(amount)
+            toAccount.balance = newBalance
+            accounts[toHex] = toAccount
+        } else {
+            let newAccount = Account(address: to, balance: amount)
+            accounts[toHex] = newAccount
+        }
+    }
+}
+
+extension [UInt8] {
+    func toM31Word() -> M31Word {
+        M31Word(bytes: self)
+    }
+}
+
 /// Maximum stack depth per EVM spec
 public let maxStackDepth = 1024
 
@@ -40,15 +133,21 @@ public struct EVMStack: Sendable {
     }
 
     /// Duplicate stack item
-    public mutating func dup(position: Int) {
-        precondition(position >= 1 && position <= height, "Invalid dup position")
+    /// - Throws: EVMExecutionError.stackUnderflow if position is invalid
+    public mutating func dup(position: Int) throws {
+        guard position >= 1 && position <= height else {
+            throw EVMExecutionError.stackUnderflow
+        }
         let value = items[height - position]
         push(value)
     }
 
     /// Swap top with position
-    public mutating func Swap(position: Int) {
-        precondition(position >= 1 && position < height, "Invalid swap position")
+    /// - Throws: EVMExecutionError.stackUnderflow if position is invalid
+    public mutating func swap(position: Int) throws {
+        guard position >= 1 && position < height else {
+            throw EVMExecutionError.stackUnderflow
+        }
         let topIndex = height - 1
         let swapIndex = height - position - 1
         let temp = items[topIndex]
@@ -276,6 +375,9 @@ public struct EVMState: Sendable {
     public var accessedAddresses: Set<String>
     public var accessedStorageKeys: Set<String>
 
+    // Account management
+    public var accountManager: AccountManager
+
     public init(block: BlockContext = BlockContext(), tx: TransactionContext = TransactionContext()) {
         self.stack = EVMStack()
         self.memory = EVMMemory()
@@ -292,6 +394,11 @@ public struct EVMState: Sendable {
         self.tx = tx
         self.accessedAddresses = []
         self.accessedStorageKeys = []
+        self.accountManager = AccountManager()
+
+        // Initialize with tx.origin as a default account with balance
+        let originAccount = Account(address: tx.origin, balance: M31Word(low64: 1_000_000_000_000_000_000))  // 1000 ETH in wei
+        self.accountManager.createAccount(originAccount)
     }
 
     // MARK: - Current Frame

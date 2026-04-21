@@ -184,29 +184,19 @@ public final class EVMLDEOptimizer {
         copyMs = (CFAbsoluteTimeGetCurrent() - copyT0) * 1000
 
         // Step 2: Batch INTT (traceLen -> traceLen, with scale)
-        if config.pipelineINTTNTT && numColumns > 1 {
-            // L1: Pipeline multiple columns
-            (inttMs, bufs) = try pipelineINTT(
-                bufs: bufs,
-                numColumns: numColumns,
-                logTrace: logTrace,
-                logEval: logEval,
-                traceLen: traceLen
-            )
-        } else {
-            let inttT0 = CFAbsoluteTimeGetCurrent()
-            guard let cb1 = commandQueues[0].makeCommandBuffer() else {
-                throw GPUProverError.noCommandBuffer
-            }
-            for colIdx in 0..<numColumns {
-                nttEngine.encodeINTT(data: bufs[colIdx], logN: logTrace, cmdBuf: cb1)
-            }
-            cb1.commit()
-            cb1.waitUntilCompleted()
-            inttMs = (CFAbsoluteTimeGetCurrent() - inttT0) * 1000
-            if let error = cb1.error {
-                throw GPUProverError.gpuError("INTT failed: \(error.localizedDescription)")
-            }
+        // PHASE 2 OPTIMIZATION: Batch all columns in single command buffer
+        let inttT0 = CFAbsoluteTimeGetCurrent()
+        guard let cbIntt = commandQueues[0].makeCommandBuffer() else {
+            throw GPUProverError.noCommandBuffer
+        }
+        for colIdx in 0..<numColumns {
+            nttEngine.encodeINTT(data: bufs[colIdx], logN: logTrace, cmdBuf: cbIntt)
+        }
+        cbIntt.commit()
+        cbIntt.waitUntilCompleted()
+        inttMs = (CFAbsoluteTimeGetCurrent() - inttT0) * 1000
+        if let error = cbIntt.error {
+            throw GPUProverError.gpuError("Batch INTT failed: \(error.localizedDescription)")
         }
 
         // Step 3: Zero-pad (extend from traceLen to evalLen)
@@ -224,26 +214,19 @@ public final class EVMLDEOptimizer {
         zeroPadMs = (CFAbsoluteTimeGetCurrent() - zeroPadT0) * 1000
 
         // Step 4: Batch NTT (traceLen -> evalLen)
-        if config.pipelineINTTNTT && numColumns > 1 {
-            (nttMs, _) = try pipelineNTT(
-                bufs: bufs,
-                numColumns: numColumns,
-                logEval: logEval
-            )
-        } else {
-            let nttT0 = CFAbsoluteTimeGetCurrent()
-            guard let cb2 = commandQueues[0].makeCommandBuffer() else {
-                throw GPUProverError.noCommandBuffer
-            }
-            for colIdx in 0..<numColumns {
-                nttEngine.encodeNTT(data: bufs[colIdx], logN: logEval, cmdBuf: cb2)
-            }
-            cb2.commit()
-            cb2.waitUntilCompleted()
-            nttMs = (CFAbsoluteTimeGetCurrent() - nttT0) * 1000
-            if let error = cb2.error {
-                throw GPUProverError.gpuError("NTT failed: \(error.localizedDescription)")
-            }
+        // PHASE 2 OPTIMIZATION: Batch all columns in single command buffer
+        let nttT0 = CFAbsoluteTimeGetCurrent()
+        guard let cbNtt = commandQueues[0].makeCommandBuffer() else {
+            throw GPUProverError.noCommandBuffer
+        }
+        for colIdx in 0..<numColumns {
+            nttEngine.encodeNTT(data: bufs[colIdx], logN: logEval, cmdBuf: cbNtt)
+        }
+        cbNtt.commit()
+        cbNtt.waitUntilCompleted()
+        nttMs = (CFAbsoluteTimeGetCurrent() - nttT0) * 1000
+        if let error = cbNtt.error {
+            throw GPUProverError.gpuError("Batch NTT failed: \(error.localizedDescription)")
         }
 
         // Step 5: Read back results

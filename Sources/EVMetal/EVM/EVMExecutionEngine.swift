@@ -112,21 +112,37 @@ public final class EVMExecutionEngine: Sendable {
         state.accessedAddresses.insert(state.currentFrame.address.toHexString())
 
         // Execute until halt or gas exhaustion
-        var iterations = 0
-        let maxIterations = 1_000_000  // Safety limit
-        while state.running && iterations < maxIterations {
-            try executeNextInstruction(&state)
-            iterations += 1
+        // Wrap in try-catch to handle errors (invalid opcode, stack underflow, etc.)
+        // On error, revert the transaction per EVM semantics
+        do {
+            var iterations = 0
+            let maxIterations = 1_000_000  // Safety limit
+            while state.running && iterations < maxIterations {
+                try executeNextInstruction(&state)
+                iterations += 1
 
-            // Periodically check for gas exhaustion
-            if iterations % 1000 == 0 && state.gas == 0 {
+                // Periodically check for gas exhaustion
+                if iterations % 1000 == 0 && state.gas == 0 {
+                    state.stop()
+                }
+            }
+
+            if iterations >= maxIterations {
+                print("WARNING: Execution hit max iterations limit (\(maxIterations))")
                 state.stop()
             }
-        }
+        } catch {
+            // EVM semantics: any error causes REVERT
+            // Record the REVERT with error info and record final trace row
+            let errorInfo = "ERROR: \(error)"
+            state.revert(message: errorInfo)
 
-        if iterations >= maxIterations {
-            print("WARNING: Execution hit max iterations limit (\(maxIterations))")
-            state.stop()
+            // Record final state after revert
+            recordTraceRow(
+                pc: state.pc,
+                opcode: 0xFD,  // REVERT opcode
+                state: state
+            )
         }
 
         // Build final trace
@@ -247,7 +263,9 @@ public final class EVMExecutionEngine: Sendable {
         case .BASEFEE:     state.stack.push(block.baseFee)
 
         // Stack and Memory
-        case .POP:     _ = state.stack.pop()
+        case .POP:
+            guard state.stack.stackHeight >= 1 else { throw EVMExecutionError.stackUnderflow }
+            _ = state.stack.pop()
         case .MLOAD:   try mload_op(&state)
         case .MSTORE:  try mstore_op(&state)
         case .MSTORE8: try mstore8_op(&state)
@@ -787,7 +805,11 @@ public final class EVMExecutionEngine: Sendable {
     private func dup_op(_ state: inout EVMState, op: EVMOpcode) throws {
         guard let pos = op.dupPosition else { return }
         if !state.chargeGas(3) { throw EVMExecutionError.outOfGas }
-        state.stack.dup(position: pos)
+        // Check stack height before DUP operation
+        if state.stack.stackHeight < pos {
+            throw EVMExecutionError.stackUnderflow
+        }
+        try state.stack.dup(position: pos)
     }
 
     // MARK: - Swap
@@ -800,7 +822,7 @@ public final class EVMExecutionEngine: Sendable {
             throw EVMExecutionError.stackUnderflow
         }
         if !state.chargeGas(3) { throw EVMExecutionError.outOfGas }
-        state.stack.Swap(position: pos)
+        try state.stack.swap(position: pos)
     }
 
     // MARK: - Log
@@ -831,48 +853,359 @@ public final class EVMExecutionEngine: Sendable {
         let retOffset = state.stack.pop()
         let retSize = state.stack.pop()
 
-        if !state.chargeGas(2600) { throw EVMExecutionError.outOfGas }
+        // Gas calculation
+        var callGas: UInt64 = 2600
 
-        // Simplified: just push success
-        state.stack.push(.one)
+        // Value transfer gas (EIP-150)
+        if !value.isZero {
+            callGas += 9000
+        }
 
-        // Record call
+        // Memory gas for input and output
+        let inWords = UInt64((Int(UInt64(inSize.low32)) + 31) / 32)
+        let retWords = UInt64((Int(UInt64(retSize.low32)) + 31) / 32)
+        callGas += 3 * (inWords + retWords) + ((inWords + retWords) * (inWords + retWords)) / 512
+
+        // Cold access cost (EIP-2929)
+        let isWarm = state.accountManager.isWarm(to)
+        if !isWarm {
+            callGas += 100
+        }
+        state.accountManager.markAccessed(to)
+
+        if !state.chargeGas(callGas) { throw EVMExecutionError.outOfGas }
+
+        // Check call depth
+        if state.callDepth >= 1024 {
+            state.stack.push(.zero)  // Fail - max call depth exceeded
+            return
+        }
+
+        // Check value transfer
+        let senderBalance = state.accountManager.getBalance(state.currentFrame.address)
+        if value.low64 > senderBalance.low64 {
+            state.stack.push(.zero)  // Fail - insufficient balance
+            return
+        }
+
+        // Get target code
+        let code = state.accountManager.getCode(to)
+        let codeHash = state.accountManager.getCodeHash(to)
+
+        // If no code, this is a transfer to EOA - success
+        if code.isEmpty {
+            // Transfer value
+            if !value.isZero {
+                state.accountManager.transferBalance(
+                    from: state.currentFrame.address,
+                    to: to,
+                    amount: value
+                )
+            }
+            state.stack.push(.one)  // Success
+            return
+        }
+
+        // Prepare input data from memory
+        let inOffsetInt = Int(UInt64(inOffset.low32))
+        let inSizeInt = Int(UInt64(inSize.low32))
+        var inputData: [UInt8] = []
+        inputData.reserveCapacity(inSizeInt)
+        for i in 0..<inSizeInt {
+            inputData.append(state.memory.loadByte(offset: inOffsetInt + i))
+        }
+
+        // Create subcall frame
+        var subFrame = CallFrame(code: code, calldata: inputData)
+        subFrame.address = to
+        subFrame.caller = state.currentFrame.address
+        subFrame.callValue = value
+        subFrame.gas = UInt64(gas.low32)
+
+        // Execute subcall (simplified - mark success with empty return)
+        state.pushFrame(subFrame)
+
+        // For a proper implementation, would recursively execute the subcall
+        // Here we pop immediately and use empty return data
+        state.popFrame()
+
+        // Copy return data to memory
+        let retOffsetInt = Int(UInt64(retOffset.low32))
+        let retSizeInt = min(Int(UInt64(retSize.low32)), 65536)
+        let returnData = state.currentFrame.returnData
+
+        if retSizeInt > 0 {
+            state.memory.expand(offset: retOffsetInt, size: retSizeInt)
+            for i in 0..<retSizeInt {
+                let byte = i < returnData.count ? returnData[i] : 0
+                state.memory.storeByte(offset: retOffsetInt + i, value: byte)
+            }
+        }
+
+        // Record call entry
         let entry = CallEntry(
             callType: .call,
             to: to,
             value: value,
             gas: UInt64(gas.low32),
-            input: [],
-            output: [],
+            input: inputData,
+            output: returnData,
             success: true,
             callDepth: state.callDepth,
             startTimestamp: UInt64(Date().timeIntervalSince1970 * 1000),
             endTimestamp: UInt64(Date().timeIntervalSince1970 * 1000)
         )
         callEntries.append(entry)
+
+        state.stack.push(.one)
     }
 
     private func delegatecall_op(_ state: inout EVMState) throws {
         guard state.stack.stackHeight >= 6 else { throw EVMExecutionError.stackUnderflow }
-        if !state.chargeGas(2600) { throw EVMExecutionError.outOfGas }
-        state.stack.push(.one)  // Simplified
+        let gas = state.stack.pop()
+        let to = state.stack.pop()
+        let inOffset = state.stack.pop()
+        let inSize = state.stack.pop()
+        let retOffset = state.stack.pop()
+        let retSize = state.stack.pop()
+
+        // Gas calculation
+        var callGas: UInt64 = 2600
+
+        // Memory gas for input and output
+        let inWords = UInt64((Int(UInt64(inSize.low32)) + 31) / 32)
+        let retWords = UInt64((Int(UInt64(retSize.low32)) + 31) / 32)
+        callGas += 3 * (inWords + retWords) + ((inWords + retWords) * (inWords + retWords)) / 512
+
+        // Cold access cost (EIP-2929)
+        let isWarm = state.accountManager.isWarm(to)
+        if !isWarm {
+            callGas += 100
+        }
+        state.accountManager.markAccessed(to)
+
+        if !state.chargeGas(callGas) { throw EVMExecutionError.outOfGas }
+
+        // Check call depth
+        if state.callDepth >= 1024 {
+            state.stack.push(.zero)
+            return
+        }
+
+        // Get target code
+        let code = state.accountManager.getCode(to)
+
+        // Prepare input data from memory
+        let inOffsetInt = Int(UInt64(inOffset.low32))
+        let inSizeInt = Int(UInt64(inSize.low32))
+        var inputData: [UInt8] = []
+        inputData.reserveCapacity(inSizeInt)
+        for i in 0..<inSizeInt {
+            inputData.append(state.memory.loadByte(offset: inOffsetInt + i))
+        }
+
+        // Create subcall frame - delegatecall inherits caller and value
+        var subFrame = CallFrame(code: code, calldata: inputData)
+        subFrame.address = to
+        subFrame.caller = state.currentFrame.caller  // Inherit caller's address
+        subFrame.callValue = state.currentFrame.callValue  // Inherit value
+        subFrame.gas = UInt64(gas.low32)
+
+        // Execute subcall (simplified)
+        state.pushFrame(subFrame)
+        state.popFrame()
+
+        // Copy return data to memory
+        let retOffsetInt = Int(UInt64(retOffset.low32))
+        let retSizeInt = min(Int(UInt64(retSize.low32)), 65536)
+        let returnData = state.currentFrame.returnData
+
+        if retSizeInt > 0 {
+            state.memory.expand(offset: retOffsetInt, size: retSizeInt)
+            for i in 0..<retSizeInt {
+                let byte = i < returnData.count ? returnData[i] : 0
+                state.memory.storeByte(offset: retOffsetInt + i, value: byte)
+            }
+        }
+
+        // Record call entry
+        let entry = CallEntry(
+            callType: .delegateCall,
+            to: to,
+            value: state.currentFrame.callValue,
+            gas: UInt64(gas.low32),
+            input: inputData,
+            output: returnData,
+            success: true,
+            callDepth: state.callDepth,
+            startTimestamp: UInt64(Date().timeIntervalSince1970 * 1000),
+            endTimestamp: UInt64(Date().timeIntervalSince1970 * 1000)
+        )
+        callEntries.append(entry)
+
+        state.stack.push(.one)
     }
 
     private func staticcall_op(_ state: inout EVMState) throws {
         guard state.stack.stackHeight >= 6 else { throw EVMExecutionError.stackUnderflow }
-        if !state.chargeGas(2600) { throw EVMExecutionError.outOfGas }
-        state.stack.push(.one)  // Simplified
+        let gas = state.stack.pop()
+        let to = state.stack.pop()
+        let inOffset = state.stack.pop()
+        let inSize = state.stack.pop()
+        let retOffset = state.stack.pop()
+        let retSize = state.stack.pop()
+
+        // Gas calculation
+        var callGas: UInt64 = 2600
+
+        // Memory gas for input and output
+        let inWords = UInt64((Int(UInt64(inSize.low32)) + 31) / 32)
+        let retWords = UInt64((Int(UInt64(retSize.low32)) + 31) / 32)
+        callGas += 3 * (inWords + retWords) + ((inWords + retWords) * (inWords + retWords)) / 512
+
+        // Cold access cost (EIP-2929)
+        let isWarm = state.accountManager.isWarm(to)
+        if !isWarm {
+            callGas += 100
+        }
+        state.accountManager.markAccessed(to)
+
+        if !state.chargeGas(callGas) { throw EVMExecutionError.outOfGas }
+
+        // Check call depth
+        if state.callDepth >= 1024 {
+            state.stack.push(.zero)
+            return
+        }
+
+        // Get target code
+        let code = state.accountManager.getCode(to)
+
+        // Prepare input data from memory
+        let inOffsetInt = Int(UInt64(inOffset.low32))
+        let inSizeInt = Int(UInt64(inSize.low32))
+        var inputData: [UInt8] = []
+        inputData.reserveCapacity(inSizeInt)
+        for i in 0..<inSizeInt {
+            inputData.append(state.memory.loadByte(offset: inOffsetInt + i))
+        }
+
+        // Create subcall frame - static call with no value transfer
+        var subFrame = CallFrame(code: code, calldata: inputData)
+        subFrame.address = to
+        subFrame.caller = state.currentFrame.address
+        subFrame.callValue = .zero  // No value in staticcall
+        subFrame.gas = UInt64(gas.low32)
+        subFrame.staticFlag = true  // Static call
+
+        // Execute subcall (simplified)
+        state.pushFrame(subFrame)
+        state.popFrame()
+
+        // Copy return data to memory
+        let retOffsetInt = Int(UInt64(retOffset.low32))
+        let retSizeInt = min(Int(UInt64(retSize.low32)), 65536)
+        let returnData = state.currentFrame.returnData
+
+        if retSizeInt > 0 {
+            state.memory.expand(offset: retOffsetInt, size: retSizeInt)
+            for i in 0..<retSizeInt {
+                let byte = i < returnData.count ? returnData[i] : 0
+                state.memory.storeByte(offset: retOffsetInt + i, value: byte)
+            }
+        }
+
+        // Record call entry
+        let entry = CallEntry(
+            callType: .staticCall,
+            to: to,
+            value: .zero,
+            gas: UInt64(gas.low32),
+            input: inputData,
+            output: returnData,
+            success: true,
+            callDepth: state.callDepth,
+            startTimestamp: UInt64(Date().timeIntervalSince1970 * 1000),
+            endTimestamp: UInt64(Date().timeIntervalSince1970 * 1000)
+        )
+        callEntries.append(entry)
+
+        state.stack.push(.one)
     }
 
     private func create_op(_ state: inout EVMState, create2: Bool) throws {
-        guard state.stack.stackHeight >= 3 else { throw EVMExecutionError.stackUnderflow }
+        guard state.stack.stackHeight >= (create2 ? 4 : 3) else { throw EVMExecutionError.stackUnderflow }
+
+        let value = state.stack.pop()
+        let offset = state.stack.pop()
+        let size = state.stack.pop()
+
+        // Gas for CREATE/CREATE2
         if !state.chargeGas(32000) { throw EVMExecutionError.outOfGas }
-        state.stack.push(.zero)  // Simplified - return zero address
+
+        // Cannot create with value if not enough balance
+        if !value.isZero {
+            let selfBalance = state.accountManager.getBalance(state.currentFrame.address)
+            if value.low64 > selfBalance.low64 {
+                state.stack.push(.zero)  // Fail - insufficient balance
+                return
+            }
+        }
+
+        let salt: M31Word
+        if create2 {
+            salt = state.stack.pop()  // Additional argument for CREATE2
+        } else {
+            salt = .zero
+        }
+
+        let offsetInt = Int(UInt64(offset.low32))
+        let sizeInt = min(Int(UInt64(size.low32)), 65536)
+
+        // Copy init code from memory
+        var initCode: [UInt8] = []
+        initCode.reserveCapacity(sizeInt)
+        for i in 0..<sizeInt {
+            initCode.append(state.memory.loadByte(offset: offsetInt + i))
+        }
+
+        // For now, return zero address (not yet deployed)
+        // A full implementation would:
+        // 1. Increment nonce
+        // 2. Compute address based on sender + nonce (or sender + salt for CREATE2)
+        // 3. Deduct value from sender
+        // 4. Execute init code
+        // 5. If successful, store final code
+
+        state.stack.push(.zero)  // Return zero for now
     }
 
     private func selfdestruct_op(_ state: inout EVMState) throws {
         guard state.stack.stackHeight >= 1 else { throw EVMExecutionError.stackUnderflow }
+
+        // SELFDESTRUCT gas cost (EIP-150 rules)
         if !state.chargeGas(5000) { throw EVMExecutionError.outOfGas }
+
+        let beneficiary = state.stack.pop()
+
+        // Cannot SELFDESTRUCT in static context
+        if state.currentFrame.staticFlag {
+            // In a full implementation, this would revert
+            // For now, just stop execution
+            state.stop()
+            return
+        }
+
+        // Transfer balance to beneficiary
+        let balance = state.accountManager.getBalance(state.currentFrame.address)
+        if !balance.isZero {
+            state.accountManager.transferBalance(
+                from: state.currentFrame.address,
+                to: beneficiary,
+                amount: balance
+            )
+        }
+
         state.stop()
     }
 
@@ -907,9 +1240,19 @@ public final class EVMExecutionEngine: Sendable {
 
     private func balance_op(_ state: inout EVMState) throws {
         guard state.stack.stackHeight >= 1 else { throw EVMExecutionError.stackUnderflow }
-        _ = state.stack.pop()
+        let address = state.stack.pop()
+
+        // Base gas for BALANCE
         if !state.chargeGas(2600) { throw EVMExecutionError.outOfGas }
-        state.stack.push(.zero)  // Simplified
+
+        // Cold access cost (EIP-2929)
+        let isWarm = state.accountManager.isWarm(address)
+        if !isWarm {
+            if !state.chargeGas(100) { throw EVMExecutionError.outOfGas }
+        }
+        state.accountManager.markAccessed(address)
+
+        state.stack.push(state.accountManager.getBalance(address))
     }
 
     private func calldataload_op(_ state: inout EVMState) throws {
@@ -934,7 +1277,24 @@ public final class EVMExecutionEngine: Sendable {
         let size = state.stack.pop()
         if !state.chargeGas(3) { throw EVMExecutionError.outOfGas }
 
-        // Simplified - would copy calldata to memory
+        let destInt = Int(UInt64(destOffset.low32))
+        let offsetInt = Int(UInt64(offset.low32))
+        let sizeInt = min(Int(UInt64(size.low32)), 65536)  // Cap at reasonable size
+
+        // Memory expansion gas
+        if sizeInt > 0 {
+            let words = UInt64((sizeInt + 31) / 32)
+            let memoryGas = 3 * words + (words * words) / 512
+            if !state.chargeGas(memoryGas) { throw EVMExecutionError.outOfGas }
+        }
+
+        // Copy calldata to memory
+        state.memory.expand(offset: destInt, size: sizeInt)
+        let calldata = state.currentFrame.calldata
+        for i in 0..<sizeInt {
+            let byte = (offsetInt + i < calldata.count) ? calldata[offsetInt + i] : 0
+            state.memory.storeByte(offset: destInt + i, value: byte)
+        }
     }
 
     private func codecopy_op(_ state: inout EVMState) throws {
@@ -944,33 +1304,120 @@ public final class EVMExecutionEngine: Sendable {
         let size = state.stack.pop()
         if !state.chargeGas(3) { throw EVMExecutionError.outOfGas }
 
-        // Simplified
+        let destInt = Int(UInt64(destOffset.low32))
+        let offsetInt = Int(UInt64(offset.low32))
+        let sizeInt = min(Int(UInt64(size.low32)), 65536)
+
+        // Memory expansion gas
+        if sizeInt > 0 {
+            let words = UInt64((sizeInt + 31) / 32)
+            let memoryGas = 3 * words + (words * words) / 512
+            if !state.chargeGas(memoryGas) { throw EVMExecutionError.outOfGas }
+        }
+
+        // Copy code to memory
+        state.memory.expand(offset: destInt, size: sizeInt)
+        let code = state.currentFrame.code
+        for i in 0..<sizeInt {
+            let byte = (offsetInt + i < code.count) ? code[offsetInt + i] : 0
+            state.memory.storeByte(offset: destInt + i, value: byte)
+        }
     }
 
     private func extcodesize_op(_ state: inout EVMState) throws {
         guard state.stack.stackHeight >= 1 else { throw EVMExecutionError.stackUnderflow }
-        _ = state.stack.pop()
+        let address = state.stack.pop()
+
         if !state.chargeGas(2600) { throw EVMExecutionError.outOfGas }
-        state.stack.push(.zero)  // Simplified
+
+        // Cold access cost (EIP-2929)
+        let isWarm = state.accountManager.isWarm(address)
+        if !isWarm {
+            if !state.chargeGas(100) { throw EVMExecutionError.outOfGas }
+        }
+        state.accountManager.markAccessed(address)
+
+        state.stack.push(M31Word(low64: UInt64(state.accountManager.getCodeSize(address))))
     }
 
     private func extcodecopy_op(_ state: inout EVMState) throws {
         guard state.stack.stackHeight >= 4 else { throw EVMExecutionError.stackUnderflow }
-        _ = state.stack.pop(); _ = state.stack.pop(); _ = state.stack.pop(); _ = state.stack.pop()
+        let address = state.stack.pop()
+        let destOffset = state.stack.pop()
+        let offset = state.stack.pop()
+        let size = state.stack.pop()
+
         if !state.chargeGas(2600) { throw EVMExecutionError.outOfGas }
+
+        // Cold access cost (EIP-2929)
+        let isWarm = state.accountManager.isWarm(address)
+        if !isWarm {
+            if !state.chargeGas(100) { throw EVMExecutionError.outOfGas }
+        }
+        state.accountManager.markAccessed(address)
+
+        let destInt = Int(UInt64(destOffset.low32))
+        let offsetInt = Int(UInt64(offset.low32))
+        let sizeInt = min(Int(UInt64(size.low32)), 65536)
+
+        // Memory expansion gas
+        if sizeInt > 0 {
+            let words = UInt64((sizeInt + 31) / 32)
+            let memoryGas = 3 * words + (words * words) / 512
+            if !state.chargeGas(memoryGas) { throw EVMExecutionError.outOfGas }
+        }
+
+        // Copy external code to memory
+        state.memory.expand(offset: destInt, size: sizeInt)
+        let code = state.accountManager.getCode(address)
+        for i in 0..<sizeInt {
+            let byte = (offsetInt + i < code.count) ? code[offsetInt + i] : 0
+            state.memory.storeByte(offset: destInt + i, value: byte)
+        }
     }
 
     private func returndatacopy_op(_ state: inout EVMState) throws {
         guard state.stack.stackHeight >= 3 else { throw EVMExecutionError.stackUnderflow }
-        _ = state.stack.pop(); _ = state.stack.pop(); _ = state.stack.pop()
+        let destOffset = state.stack.pop()
+        let offset = state.stack.pop()
+        let size = state.stack.pop()
         if !state.chargeGas(3) { throw EVMExecutionError.outOfGas }
+
+        let destInt = Int(UInt64(destOffset.low32))
+        let offsetInt = Int(UInt64(offset.low32))
+        let sizeInt = min(Int(UInt64(size.low32)), 65536)
+
+        // Memory expansion gas
+        if sizeInt > 0 {
+            let words = UInt64((sizeInt + 31) / 32)
+            let memoryGas = 3 * words + (words * words) / 512
+            if !state.chargeGas(memoryGas) { throw EVMExecutionError.outOfGas }
+        }
+
+        // Copy returnData to memory
+        state.memory.expand(offset: destInt, size: sizeInt)
+        let returnData = state.currentFrame.returnData
+        for i in 0..<sizeInt {
+            let byte = (offsetInt + i < returnData.count) ? returnData[offsetInt + i] : 0
+            state.memory.storeByte(offset: destInt + i, value: byte)
+        }
     }
 
     private func extcodehash_op(_ state: inout EVMState) throws {
         guard state.stack.stackHeight >= 1 else { throw EVMExecutionError.stackUnderflow }
-        _ = state.stack.pop()
+        let address = state.stack.pop()
+
         if !state.chargeGas(2600) { throw EVMExecutionError.outOfGas }
-        state.stack.push(.zero)  // Simplified
+
+        // Cold access cost (EIP-2929)
+        let isWarm = state.accountManager.isWarm(address)
+        if !isWarm {
+            if !state.chargeGas(100) { throw EVMExecutionError.outOfGas }
+        }
+        state.accountManager.markAccessed(address)
+
+        // Non-existent account returns zero hash
+        state.stack.push(state.accountManager.getCodeHash(address))
     }
 
     // MARK: - Block Operations

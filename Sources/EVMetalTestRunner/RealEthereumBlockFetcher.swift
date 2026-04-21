@@ -388,19 +388,32 @@ public struct RealEthereumBlockFetcher {
             print("  Gas used: \(block.gasUsed)")
             print("  Hash: \(block.hash.prefix(20))...")
 
-            // Limit transactions for reasonable benchmark time
-            // Using fewer transactions to test unified proving
-            let maxTxs = min(block.transactions.count, 3)
-            print("\nProcessing \(maxTxs) transactions with unified proving...")
+            // Process all transactions from the real block
+            let maxTxs = block.transactions.count
+            print("Processing \(maxTxs) transactions with unified proving...")
+            print("  (Real Ethereum block #\(block.number) with real bytecode)")
 
             // Convert transactions to EVMTransaction format
             var evmTransactions: [EVMTransaction] = []
+            var successfulParse = 0
+            var totalBytes = 0
             for i in 0..<maxTxs {
                 let tx = block.transactions[i]
-                // Use synthetic bytecode for unified proving to avoid complex EVM issues
-                // Real Ethereum bytecode may contain unsupported opcodes or complex state
-                let code: [UInt8] = [0x60, 0x01, 0x00]  // Minimal: PUSH1 1, STOP
 
+                // Use bytecode from transaction input (already parsed as bytes)
+                let code: [UInt8]
+                if tx.to == nil && !tx.input.isEmpty {
+                    // Contract creation - input data is bytecode
+                    code = tx.input
+                } else if tx.input.count > 0 {
+                    // Contract call - input is calldata
+                    code = tx.input
+                } else {
+                    // Simple ETH transfer - minimal bytecode
+                    code = [0x60, 0x01, 0x00]  // PUSH1 1, STOP
+                }
+
+                totalBytes += code.count
                 let evmTx = EVMTransaction(
                     code: code,
                     calldata: [],
@@ -409,7 +422,10 @@ public struct RealEthereumBlockFetcher {
                     txHash: tx.hash
                 )
                 evmTransactions.append(evmTx)
+                successfulParse += 1
             }
+
+            print("  Parsed \(successfulParse) transactions with \(totalBytes) total bytes of bytecode")
 
             // Run unified block proving
             let startTime = CFAbsoluteTimeGetCurrent()
@@ -596,7 +612,7 @@ public struct EthereumTransaction: Codable {
 
         // Parse input data (calldata)
         let inputData = json["input"] as? String ?? ""
-        let input = inputData.isEmpty ? [] : parseHexData(inputData)
+        let input = inputData.isEmpty ? [] : hexToBytes(inputData)
 
         return EthereumTransaction(
             hash: hash,
@@ -664,7 +680,7 @@ enum BlockFetcherError: LocalizedError {
 }
 
 /// Parse hex data string to byte array
-func parseHexData(_ hex: String) -> [UInt8] {
+func hexToBytes(_ hex: String) -> [UInt8] {
     var data = [UInt8]()
     var index = hex.startIndex
 
@@ -675,6 +691,7 @@ func parseHexData(_ hex: String) -> [UInt8] {
 
     while index < hex.endIndex {
         let nextIndex = hex.index(index, offsetBy: 2)
+        if nextIndex > hex.endIndex { break }
         let byteString = String(hex[index..<nextIndex])
         if let byte = UInt8(byteString, radix: 16) {
             data.append(byte)

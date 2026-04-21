@@ -779,10 +779,10 @@ extension BlockAIR {
     public static func forBlock(
         transactions: [EVMTransaction],
         blockContext: BlockContext,
-        initialStateRoot: M31Word
+        initialStateRoot: M31Word,
+        logTraceLength: Int = 12
     ) throws -> BlockAIR {
         let transactionCount = transactions.count
-        let logTraceLength = 12  // 4096 rows per transaction
         let blockGasLimit = blockContext.gasLimit
 
         return BlockAIR(
