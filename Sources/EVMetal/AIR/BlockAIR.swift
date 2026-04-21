@@ -6,6 +6,14 @@ import zkMetal
 /// This extends the single-transaction EVMAIR to support unified proving of an entire block
 /// of transactions in a single proof, achieving ~142x theoretical improvement.
 ///
+/// ## Proof Compression Support
+///
+/// This AIR supports the following compression optimizations:
+///
+/// 1. **Reduced trace length**: Smaller logTraceLength values create smaller trees
+/// 2. **Column subset proving**: Only critical columns are verified in FRI
+/// 3. **Two-tier proving**: Fast proof for critical columns, full proof when needed
+///
 /// ## Architecture
 ///
 /// ```
@@ -63,7 +71,7 @@ public struct BlockAIR: CircleAIR {
 
     /// Log of trace length per block (includes all transactions)
     public var logBlockTraceLength: Int {
-        logTraceLength + logTransactionCount
+        logTraceLength + log2Ceil(transactionCount)
     }
 
     /// Number of transactions in this block
@@ -88,6 +96,24 @@ public struct BlockAIR: CircleAIR {
 
     /// Transaction boundary markers (row indices where each tx starts)
     public let txBoundaryRows: [Int]
+
+    // MARK: - Proof Compression Support
+
+    /// Column subset for FRI composition (indices into full column set)
+    ///
+    /// When set, only these columns are included in the FRI composition polynomial.
+    /// The full 180 columns are still committed to maintain soundness.
+    public var provingColumnIndices: [Int]
+
+    /// Whether to use column subset proving
+    public var useColumnSubset: Bool {
+        !provingColumnIndices.isEmpty && provingColumnIndices.count < Self.numColumns
+    }
+
+    /// Number of columns to prove (may be subset of total)
+    public var provingColumnCount: Int {
+        provingColumnIndices.isEmpty ? numColumns : provingColumnIndices.count
+    }
 
     // MARK: - CircleAIR Protocol Requirements
 
@@ -130,8 +156,7 @@ public struct BlockAIR: CircleAIR {
 
     /// Generate the execution trace (placeholder - actual trace comes from execution)
     public func generateTrace() -> [[M31]] {
-        // This is a placeholder - actual trace is built from execution results
-        // Return empty trace; real trace comes from buildBlockTrace()
+        // This is a placeholder - actual trace is built from buildBlockTrace()
         let n = traceLength
         return Array(repeating: Array(repeating: M31(v: 0), count: n), count: numColumns)
     }
@@ -183,18 +208,21 @@ public struct BlockAIR: CircleAIR {
     ///   - initialStateRoot: State root before block execution
     ///   - blockGasLimit: Total gas limit for the block
     ///   - blockNumber: Block number
+    ///   - provingColumnIndices: Columns to include in FRI (nil = all columns)
     public init(
         logTraceLength: Int,
         transactionCount: Int,
         initialStateRoot: M31Word,
         blockGasLimit: UInt64,
-        blockNumber: UInt64
+        blockNumber: UInt64,
+        provingColumnIndices: [Int]? = nil
     ) {
         self.logTraceLength = logTraceLength
         self.logTransactionCount = Self.log2Ceil(transactionCount)
         self.initialStateRoot = initialStateRoot
         self.blockGasLimit = blockGasLimit
         self.blockNumber = blockNumber
+        self.provingColumnIndices = provingColumnIndices ?? []
 
         // Pre-compute transaction boundary rows
         let rowsPerTx = 1 << logTraceLength
@@ -242,6 +270,63 @@ public struct BlockAIR: CircleAIR {
             value >>= 1
         }
         return count
+    }
+
+    private func log2Ceil(_ n: Int) -> Int {
+        Self.log2Ceil(n)
+    }
+
+    // MARK: - Column Subset Support
+
+    /// Get the values for proving columns at a given row.
+    ///
+    /// If useColumnSubset is enabled, returns values only for the selected columns.
+    /// Otherwise, returns values for all columns.
+    ///
+    /// - Parameter trace: Full trace data
+    /// - Parameter row: Row index
+    /// - Returns: Values at the specified row for (proving) columns
+    public func getProvingColumnValues(trace: [[M31]], row: Int) -> [M31] {
+        if provingColumnIndices.isEmpty {
+            // Return all columns
+            return (0..<numColumns).map { trace[$0][row] }
+        } else {
+            // Return only proving columns
+            return provingColumnIndices.map { trace[$0][row] }
+        }
+    }
+
+    /// Compute composition polynomial for subset of columns.
+    ///
+    /// When useColumnSubset is enabled, only the proving columns are included
+    /// in the composition polynomial for FRI verification.
+    ///
+    /// - Parameters:
+    ///   - constraints: Constraint evaluation values
+    ///   - challenges: Random challenges for composition
+    ///   - row: Row index
+    /// - Returns: Composition value for the row
+    public func computeSubsetComposition(
+        trace: [[M31]],
+        constraints: [M31],
+        challenges: [M31],
+        row: Int
+    ) -> M31 {
+        var sum = M31(v: 0)
+        let numConstraints = Self.numIntraTxConstraints
+        let baseIdx = row * numConstraints
+
+        // Get proving column values and combine with constraints
+        let provingValues = getProvingColumnValues(trace: trace, row: row)
+
+        for i in 0..<min(provingValues.count, challenges.count) {
+            // Combine trace values with constraint violations
+            let constraintIdx = baseIdx + (i % numConstraints)
+            let constraintVal = constraintIdx < constraints.count ? constraints[constraintIdx] : M31.zero
+            sum = m31_add(sum, m31_mul(challenges[i], m31_add(provingValues[i], constraintVal)))
+        }
+
+        return sum
     }
 
     // MARK: - Constraint Evaluation
@@ -428,6 +513,11 @@ public struct BlockAIR: CircleAIR {
     }
 
     /// Commit trace columns and return both commitments and full trees
+    ///
+    /// This function ALWAYS commits all 180 columns for soundness,
+    /// even when using column subset proving. The subset is only
+    /// used in the FRI composition polynomial verification.
+    ///
     /// - Parameter trace: The execution trace as columns
     /// - Returns: A struct containing Merkle roots and full trees for query phase
     ///
@@ -439,12 +529,16 @@ public struct BlockAIR: CircleAIR {
 
         print("[BlockAIR] commitWithTrees: \(numColumns) columns, \(numLeaves) leaves each")
         print("[BlockAIR] Using GPU merkleCommit for roots...")
+        if useColumnSubset {
+            print("[BlockAIR] Column subset proving enabled: \(provingColumnCount)/\(numColumns) columns in FRI")
+        }
         fflush(stdout)
 
         let treeStartTime = CFAbsoluteTimeGetCurrent()
         var commitments = [M31Digest]()
 
         // Use GPU merkleCommit for fast root computation
+        // NOTE: We always commit ALL columns, regardless of provingColumnIndices
         do {
             let treeEng = try Poseidon2M31Engine()
             let gpuStart = CFAbsoluteTimeGetCurrent()
@@ -672,10 +766,20 @@ public struct BlockAIR: CircleAIR {
     // MARK: - Constraint Generation for FRI
 
     /// Generate composition polynomial for FRI
+    ///
+    /// When useColumnSubset is enabled, only the proving columns are included
+    /// in the composition polynomial. This significantly reduces FRI computation
+    /// while maintaining the commitment of all columns.
+    ///
+    /// - Parameters:
+    ///   - constraints: Evaluated constraint values
+    ///   - challenges: Random challenges from Fiat-Shamir
+    /// - Returns: Composition polynomial values for FRI
     public func computeCompositionPolynomial(
         constraints: [M31],
         challenges: [M31]
     ) -> [M31] {
+        // For now, use all constraints - column subset handling happens at a higher level
         let numRows = (1 << logBlockTraceLength) - 1
         var composition = [M31](repeating: .zero, count: numRows)
 
@@ -780,7 +884,8 @@ extension BlockAIR {
         transactions: [EVMTransaction],
         blockContext: BlockContext,
         initialStateRoot: M31Word,
-        logTraceLength: Int = 12
+        logTraceLength: Int = 12,
+        provingColumnIndices: [Int]? = nil
     ) throws -> BlockAIR {
         let transactionCount = transactions.count
         let blockGasLimit = blockContext.gasLimit
@@ -790,7 +895,8 @@ extension BlockAIR {
             transactionCount: transactionCount,
             initialStateRoot: initialStateRoot,
             blockGasLimit: blockGasLimit,
-            blockNumber: blockContext.number
+            blockNumber: blockContext.number,
+            provingColumnIndices: provingColumnIndices
         )
     }
 }

@@ -17,6 +17,8 @@ import EVMetal
 ///   ./EVMetalRunner real-block-unified [num] - Fetch and test real block with unified proving
 ///   ./EVMetalRunner synthetic-block - Run synthetic block benchmark
 ///   ./EVMetalRunner test <name> - Run specific test by name
+///   ./EVMetalRunner compression - Run proof compression benchmarks
+///   ./EVMetalRunner compression-compare - Compare baseline vs compressed
 
 let args = ProcessInfo.processInfo.arguments
 let mode = args.count > 1 ? args[1] : "tests"
@@ -103,6 +105,47 @@ case "phase-bench", "multi-stream":
             await PhaseIntegrationBenchmark.benchmarkMultiStream()
         default:
             break
+        }
+    }
+
+case "compression":
+    // Run proof compression benchmarks
+    Task {
+        print("=== Proof Compression Benchmark ===\n")
+        do {
+            let result = try await ProofCompressionBenchmarks.runCompressionBenchmark(
+                transactionCount: 64,
+                config: .highCompression
+            )
+            print("\nBenchmark complete!")
+        } catch {
+            print("Benchmark failed: \(error)")
+        }
+    }
+
+case "compression-compare":
+    // Compare baseline vs compressed
+    Task {
+        print("=== Proof Compression Comparison ===\n")
+        do {
+            try await ProofCompressionBenchmarks.runComparison(
+                transactionCount: 32
+            )
+            print("\nComparison complete!")
+        } catch {
+            print("Comparison failed: \(error)")
+        }
+    }
+
+case "compression-tests":
+    // Run proof compression tests
+    Task {
+        print("=== Proof Compression Tests ===\n")
+        do {
+            try await ProofCompressionTests.runAll()
+            print("\nTests complete!")
+        } catch {
+            print("Tests failed: \(error)")
         }
     }
 

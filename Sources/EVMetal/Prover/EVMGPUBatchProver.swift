@@ -98,6 +98,11 @@ public final class EVMGPUBatchProver {
     private let gpuProver: EVMetalCustomProver
     private var brakedownEngine: EVMetalBrakedownEngine?
     private var ldeOptimizer: EVMLDEOptimizer?
+    private var gpuMerkleEngine: EVMGPUMerkleEngine?
+
+    // GPU proof generation state
+    private var gpuTreeBuffer: MTLBuffer?
+    private var gpuTreeNumLeaves: Int = 0
 
     // LDE optimization configuration
     private let ldeConfig: EVMLDEOptimizer.Config
@@ -117,6 +122,9 @@ public final class EVMGPUBatchProver {
         if config.commitmentStrategy == .brakedown || config.commitmentStrategy == .brakedownInterleaved {
             self.brakedownEngine = try EVMetalBrakedownEngine()
         }
+
+        // Initialize GPU Merkle engine for GPU proof generation
+        self.gpuMerkleEngine = try? EVMGPUMerkleEngine()
     }
 
     // MARK: - Prove Single Transaction
@@ -142,7 +150,8 @@ public final class EVMGPUBatchProver {
         let trace = air.generateTrace()
         let traceLen = trace[0].count
         let numColumns = trace.count
-        let logTrace = air.logTraceLength
+        // Ensure logTrace is at least 1 to avoid invalid range in Circle NTT (1..<0 is invalid)
+        let logTrace = max(1, air.logTraceLength)
         let logEval = logTrace + config.logBlowup
         let evalLen = 1 << logEval
 
@@ -159,8 +168,30 @@ public final class EVMGPUBatchProver {
         switch config.commitmentStrategy {
         case .merkle:
             // Traditional Poseidon2-M31 Merkle tree commitment
-            let commitResult = try gpuProver.commitTraceColumns(traceLDEs: traceLDEs, evalLen: evalLen)
-            traceCommitments = commitResult.commitments
+            // OPTIMIZATION: Use GPU Merkle engine with tree structure preservation
+            // for GPU-side proof generation (eliminates CPU tree rebuilding bottleneck)
+            if let merkleEng = gpuMerkleEngine {
+                // Convert traceLDEs to treesLeaves format (8 M31 per leaf)
+                var treesLeaves: [[M31]] = []
+                for col in traceLDEs {
+                    treesLeaves.append(Array(col.prefix(evalLen * 8)))
+                }
+
+                // Build trees with GPU proof support (keeps tree buffer)
+                let (roots, treeBuf, numLeaves) = try merkleEng.buildTreesWithGPUProof(
+                    treesLeaves: treesLeaves,
+                    keepTreeBuffer: true
+                )
+                traceCommitments = roots
+                gpuTreeBuffer = treeBuf
+                gpuTreeNumLeaves = numLeaves
+            } else {
+                // Fallback if GPU Merkle engine unavailable
+                let commitResult = try gpuProver.commitTraceColumns(traceLDEs: traceLDEs, evalLen: evalLen)
+                traceCommitments = commitResult.commitments
+                gpuTreeBuffer = nil
+                gpuTreeNumLeaves = 0
+            }
             brakedownBatchRoot = nil
 
         case .brakedown:
@@ -375,15 +406,54 @@ public final class EVMGPUBatchProver {
         var responses: [GPUCircleSTARKQueryResponse] = []
         let limitQueries = min(numQueries, 10)  // Limit for testing
 
-        for _ in 0..<limitQueries {
+        // OPTIMIZATION: Generate proof paths on GPU when tree buffer is available
+        // This eliminates the CPU tree rebuilding bottleneck (~30s for 180 trees)
+        var gpuProofPaths: [[M31Digest]]? = nil
+
+        if let treeBuf = gpuTreeBuffer, gpuTreeNumLeaves > 0 {
+            // Generate proofs on GPU for all columns at once
+            // For each query, we need proofs for all columns
+            // Generate random query indices
+            var queryIndices: [Int] = []
+            for _ in 0..<limitQueries {
+                queryIndices.append(Int.random(in: 0..<evalLen))
+            }
+
+            // Generate GPU proofs (this is fast - just pointer chasing through tree)
+            if let merkleEng = gpuMerkleEngine {
+                do {
+                    gpuProofPaths = try merkleEng.generateProofsGPU(
+                        treeBuffer: treeBuf,
+                        numTrees: numColumns,
+                        numLeaves: gpuTreeNumLeaves,
+                        queryIndices: queryIndices
+                    )
+                    print("  [GPU Batch Prover] GPU proof generation: \(limitQueries) queries, \(numColumns) columns")
+                } catch {
+                    print("  [GPU Batch Prover] GPU proof generation failed: \(error), falling back to CPU")
+                    gpuProofPaths = nil
+                }
+            }
+        }
+
+        // Build query responses with proofs
+        for queryIdx in 0..<limitQueries {
             let qi = Int.random(in: 0..<evalLen)
 
             // Build trace values at query position
             var traceVals: [M31] = []
             var tracePaths: [[M31Digest]] = []
+
             for colIdx in 0..<numColumns {
                 traceVals.append(traceLDEs[colIdx][qi])
-                tracePaths.append([])
+
+                // Use GPU proof if available, otherwise empty path
+                if let paths = gpuProofPaths, colIdx < paths.count {
+                    // Use the proof for this column (same query index for all columns)
+                    tracePaths.append(paths[colIdx])
+                } else {
+                    tracePaths.append([])
+                }
             }
 
             // Create query response using GPU type

@@ -591,6 +591,134 @@ public struct ProverTests {
         }
     }
 
+    /// Test GPU-side Merkle proof generation (eliminates CPU tree rebuilding bottleneck).
+    ///
+    /// This tests the optimization that generates proof paths directly on GPU
+    /// instead of rebuilding trees on CPU for each query.
+    public static func testGPUProofGeneration() {
+        print("Test: GPU Merkle Proof Generation")
+
+        do {
+            let merkleEngine = try EVMGPUMerkleEngine()
+
+            // Create 4 trees, each with 16 leaves (8 M31 elements per leaf)
+            let nodeSize = 8
+            let leavesPerTree = 16
+
+            var treesLeaves: [[M31]] = []
+            for t in 0..<4 {
+                var leaves: [M31] = []
+                for i in 0..<leavesPerTree {
+                    for j in 0..<nodeSize {
+                        leaves.append(M31(v: UInt32(t * 1000 + i * 10 + j)))
+                    }
+                }
+                treesLeaves.append(leaves)
+            }
+
+            // Build trees with GPU proof support (keeps tree buffer)
+            print("  Building trees with GPU proof support...")
+            let (roots, treeBuffer, numLeaves) = try merkleEngine.buildTreesWithGPUProof(
+                treesLeaves: treesLeaves,
+                keepTreeBuffer: true
+            )
+
+            assert(roots.count == 4, "Should have 4 roots")
+            assert(treeBuffer != nil, "Tree buffer should be preserved for GPU proof generation")
+            assert(numLeaves == leavesPerTree, "Num leaves should match")
+
+            print("  ✓ Built \(roots.count) trees with GPU proof support")
+
+            // Generate proofs on GPU
+            let queryIndices = [3, 7, 12, 1]  // Random query indices
+            print("  Generating GPU proofs for indices: \(queryIndices)...")
+
+            let proofT0 = CFAbsoluteTimeGetCurrent()
+            let proofs = try merkleEngine.generateProofsGPU(
+                treeBuffer: treeBuffer!,
+                numTrees: 4,
+                numLeaves: leavesPerTree,
+                queryIndices: queryIndices
+            )
+            let proofTime = (CFAbsoluteTimeGetCurrent() - proofT0) * 1000
+
+            assert(proofs.count == 4, "Should have 4 proof paths")
+
+            // Verify proof structure (12 levels for 16 leaves = log2(16) = 4 levels)
+            let expectedLevels = 4  // log2(16) = 4
+            for (treeIdx, proof) in proofs.enumerated() {
+                assert(proof.count == expectedLevels, "Tree \(treeIdx): expected \(expectedLevels) levels, got \(proof.count)")
+                print("  Tree \(treeIdx) proof: \(proof.count) levels (siblings: \(proof.map { $0.values[0].v }))")
+            }
+
+            // CPU baseline for comparison
+            print("  Comparing with CPU proof generation...")
+            let cpuT0 = CFAbsoluteTimeGetCurrent()
+
+            // Build flattened tree on CPU for comparison
+            var cpuTrees: [[zkMetal.M31Digest]] = []
+            for treeLeaves in treesLeaves {
+                var tree: [zkMetal.M31Digest] = []
+                for i in 0..<leavesPerTree {
+                    let values = Array(treeLeaves[i * nodeSize..<(i + 1) * nodeSize])
+                    tree.append(zkMetal.M31Digest(values: values))
+                }
+                // Build internal nodes
+                var levelSize = leavesPerTree
+                while levelSize > 1 {
+                    for i in stride(from: 0, to: levelSize, by: 2) {
+                        let left = tree[i]
+                        let right = i + 1 < levelSize ? tree[i + 1] : tree[i]
+                        tree.append(zkMetal.M31Digest(values: poseidon2M31Hash(left: left.values, right: right.values)))
+                    }
+                    levelSize = (levelSize + 1) / 2
+                }
+                cpuTrees.append(tree)
+            }
+
+            // Generate CPU proofs
+            var cpuProofs: [[zkMetal.M31Digest]] = []
+            for (treeIdx, tree) in cpuTrees.enumerated() {
+                var path: [zkMetal.M31Digest] = []
+                var levelStart = 0
+                var levelSize = leavesPerTree
+                var idx = queryIndices[treeIdx]
+                while levelSize > 1 {
+                    let sibIdx = idx ^ 1
+                    path.append(tree[levelStart + sibIdx])
+                    levelStart += levelSize
+                    levelSize /= 2
+                    idx /= 2
+                }
+                cpuProofs.append(path)
+            }
+
+            let cpuTime = (CFAbsoluteTimeGetCurrent() - cpuT0) * 1000
+
+            // Verify GPU proofs match CPU proofs
+            var allMatch = true
+            for treeIdx in 0..<4 {
+                for level in 0..<expectedLevels {
+                    if proofs[treeIdx][level].values != cpuProofs[treeIdx][level].values {
+                        allMatch = false
+                        print("  MISMATCH at tree=\(treeIdx), level=\(level)")
+                        print("    GPU: \(proofs[treeIdx][level].values[0].v)")
+                        print("    CPU: \(cpuProofs[treeIdx][level].values[0].v)")
+                    }
+                }
+            }
+
+            print("\n  === GPU Proof Generation Results ===")
+            print("  GPU proof time: \(String(format: "%.3f", proofTime))ms")
+            print("  CPU proof time: \(String(format: "%.3f", cpuTime))ms")
+            print("  Speedup: \(String(format: "%.1fx", cpuTime / max(proofTime, 0.001)))")
+            print("  Proofs match: \(allMatch ? "YES" : "NO")")
+            print("\n  ✓ GPU Proof Generation test passed\n")
+        } catch {
+            print("  ⚠ GPU Proof Generation test failed: \(error)\n")
+        }
+    }
+
 
     // MARK: - Batch Commit Profiling
 

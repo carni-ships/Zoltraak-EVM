@@ -841,4 +841,266 @@ public final class EVMetalGPUProver {
 
         return (cpuMs, gpuMs, cpuMs / gpuMs)
     }
+
+    // MARK: - GPU Proof Generation
+
+    /// Result type for GPU Merkle commitment with tree structure preserved.
+    public struct GPUCommitResult {
+        /// The computed commitments, one per trace column.
+        public let commitments: [zkMetal.M31Digest]
+        /// GPU buffer containing flattened tree structure (for proof generation).
+        public let treeBuffer: MTLBuffer?
+        /// Number of leaves per tree.
+        public let numLeaves: Int
+        /// Total elapsed time in milliseconds.
+        public let timeMs: Double
+
+        public init(commitments: [zkMetal.M31Digest], treeBuffer: MTLBuffer?, numLeaves: Int, timeMs: Double) {
+            self.commitments = commitments
+            self.treeBuffer = treeBuffer
+            self.numLeaves = numLeaves
+            self.timeMs = timeMs
+        }
+    }
+
+    /// Commit trace columns using GPU with GPU-side proof generation.
+    ///
+    /// This is an OPTIMIZED version that keeps the GPU tree structure for
+    /// generating Merkle proofs directly on GPU without CPU tree rebuilding.
+    ///
+    /// This eliminates the ~30s CPU bottleneck for large blocks with 180 trees.
+    ///
+    /// - Parameters:
+    ///   - traceLDEs: Trace columns in LDE form, where each column is an array of M31 values.
+    ///   - evalLen: Evaluation length (number of leaves per column, power of 2).
+    ///   - keepTreeBuffer: If true, keeps the flattened tree structure in GPU memory.
+    /// - Returns: `GPUCommitResult` containing commitments, tree buffer, and timing.
+    /// - Throws: Error if GPU operations fail.
+    public func commitTraceColumnsWithGPUProof(
+        traceLDEs: [[M31]],
+        evalLen: Int,
+        keepTreeBuffer: Bool = true
+    ) throws -> GPUCommitResult {
+        let t0 = CFAbsoluteTimeGetCurrent()
+        let numColumns = traceLDEs.count
+
+        // Determine input format
+        let m31PerLeaf: Int
+        let actualLeavesPerColumn: Int
+
+        if !traceLDEs.isEmpty && !traceLDEs[0].isEmpty {
+            let valuesPerCol = traceLDEs[0].count
+            if valuesPerCol >= evalLen * 8 {
+                m31PerLeaf = 8
+                actualLeavesPerColumn = evalLen
+            } else {
+                m31PerLeaf = 1
+                actualLeavesPerColumn = evalLen
+            }
+        } else {
+            m31PerLeaf = 1
+            actualLeavesPerColumn = evalLen
+        }
+
+        print("    [GPU Prover] commitTraceColumnsWithGPUProof: numColumns=\(numColumns), evalLen=\(evalLen)")
+
+        // Pre-hash leaves if needed
+        var treesLeaves: [[M31]]
+
+        if m31PerLeaf == 8 {
+            // Data is already in pre-hashed node format
+            treesLeaves = traceLDEs.map { Array($0.prefix(evalLen * 8)) }
+        } else {
+            // Need to hash leaves with position
+            print("    [GPU Prover] Hashing leaves with position...")
+            let leafHashT0 = CFAbsoluteTimeGetCurrent()
+
+            // Flatten values
+            var flatValues: [M31] = []
+            flatValues.reserveCapacity(numColumns * evalLen)
+            for col in traceLDEs {
+                flatValues.append(contentsOf: col)
+            }
+
+            // CPU hash with position (fast on multi-core CPU)
+            let allDigests = cpuProver.hashLeavesBatchPerColumn(
+                allValues: flatValues,
+                numColumns: numColumns,
+                countPerColumn: evalLen
+            )
+
+            treesLeaves = allDigests
+            let leafHashMs = (CFAbsoluteTimeGetCurrent() - leafHashT0) * 1000
+            print("    [GPU Prover] Leaf hashing: \(String(format: "%.1f", leafHashMs))ms")
+        }
+
+        // Build trees with GPU proof support
+        print("    [GPU Prover] Building trees with GPU proof support...")
+        let treeBuildT0 = CFAbsoluteTimeGetCurrent()
+
+        guard let merkleEng = merkleEngine else {
+            throw GPUProverError.gpuError("Merkle engine not available")
+        }
+
+        let (roots, treeBuffer, numLeaves) = try merkleEng.buildTreesWithGPUProof(
+            treesLeaves: treesLeaves,
+            keepTreeBuffer: keepTreeBuffer
+        )
+
+        let treeBuildMs = (CFAbsoluteTimeGetCurrent() - treeBuildT0) * 1000
+        let elapsed = (CFAbsoluteTimeGetCurrent() - t0) * 1000
+
+        print("    [GPU Prover] Tree building: \(String(format: "%.1f", treeBuildMs))ms")
+
+        return GPUCommitResult(
+            commitments: roots,
+            treeBuffer: treeBuffer,
+            numLeaves: numLeaves,
+            timeMs: elapsed
+        )
+    }
+
+    /// Generate Merkle proofs for multiple columns using GPU.
+    ///
+    /// This is the KEY OPTIMIZATION: Uses the pre-built GPU tree structure
+    /// to generate proofs directly on GPU without CPU tree rebuilding.
+    ///
+    /// - Parameters:
+    ///   - treeBuffer: GPU buffer containing flattened tree structure.
+    ///   - numColumns: Number of columns/trees.
+    ///   - numLeaves: Number of leaves per tree.
+    ///   - queryIndices: Array of leaf indices to generate proofs for (one per column).
+    /// - Returns: Array of proof paths, one per column.
+    /// - Throws: Error if GPU operations fail.
+    public func generateProofsGPU(
+        treeBuffer: MTLBuffer,
+        numColumns: Int,
+        numLeaves: Int,
+        queryIndices: [Int]
+    ) throws -> [[zkMetal.M31Digest]] {
+        guard let merkleEng = merkleEngine else {
+            throw GPUProverError.gpuError("Merkle engine not available")
+        }
+
+        return try merkleEng.generateProofsGPU(
+            treeBuffer: treeBuffer,
+            numTrees: numColumns,
+            numLeaves: numLeaves,
+            queryIndices: queryIndices
+        )
+    }
+
+    /// Commit trace columns and generate proofs in one optimized pipeline.
+    ///
+    /// This is the MOST OPTIMIZED approach:
+    /// 1. GPU builds trees (keeping tree structure)
+    /// 2. GPU generates proofs directly from tree structure
+    /// 3. No CPU tree rebuilding required
+    ///
+    /// This eliminates the ~30s CPU bottleneck entirely.
+    ///
+    /// - Parameters:
+    ///   - traceLDEs: Trace columns in LDE form.
+    ///   - evalLen: Evaluation length.
+    ///   - queryIndices: Leaf indices to query for each column.
+    /// - Returns: Tuple of (commitments, proofs).
+    /// - Throws: Error if GPU operations fail.
+    public func commitAndProveGPU(
+        traceLDEs: [[M31]],
+        evalLen: Int,
+        queryIndices: [Int]
+    ) throws -> (commitments: [zkMetal.M31Digest], proofs: [[zkMetal.M31Digest]]) {
+        let t0 = CFAbsoluteTimeGetCurrent()
+
+        // Step 1: Commit with tree buffer preserved
+        let commitResult = try commitTraceColumnsWithGPUProof(
+            traceLDEs: traceLDEs,
+            evalLen: evalLen,
+            keepTreeBuffer: true
+        )
+
+        // Step 2: Generate proofs on GPU
+        var proofs: [[zkMetal.M31Digest]] = []
+
+        if let treeBuf = commitResult.treeBuffer {
+            print("    [GPU Prover] Generating GPU proofs...")
+            let proofT0 = CFAbsoluteTimeGetCurrent()
+
+            proofs = try generateProofsGPU(
+                treeBuffer: treeBuf,
+                numColumns: traceLDEs.count,
+                numLeaves: commitResult.numLeaves,
+                queryIndices: queryIndices
+            )
+
+            let proofMs = (CFAbsoluteTimeGetCurrent() - proofT0) * 1000
+            print("    [GPU Prover] Proof generation: \(String(format: "%.1f", proofMs))ms")
+        } else {
+            // Fallback to CPU proof generation
+            print("    [GPU Prover] No tree buffer, falling back to CPU proof generation")
+            let proofT0 = CFAbsoluteTimeGetCurrent()
+
+            // Build trees on CPU and generate proofs
+            for (colIdx, col) in traceLDEs.enumerated() {
+                let digests = Array(col.prefix(evalLen * 8))
+                let tree = buildFlattenedTree(digests: digests, numLeaves: evalLen)
+                let proof = generateProofFromTree(tree: tree, n: evalLen, index: queryIndices[colIdx])
+                proofs.append(proof)
+            }
+
+            let proofMs = (CFAbsoluteTimeGetCurrent() - proofT0) * 1000
+            print("    [GPU Prover] CPU proof generation: \(String(format: "%.1f", proofMs))ms")
+        }
+
+        let totalMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000
+        print("    [GPU Prover] commitAndProveGPU total: \(String(format: "%.1f", totalMs))ms")
+
+        return (commitResult.commitments, proofs)
+    }
+
+    // MARK: - Helper Methods
+
+    /// Build a flattened tree from digests (CPU fallback).
+    private func buildFlattenedTree(digests: [M31], numLeaves: Int) -> [zkMetal.M31Digest] {
+        let nodeSize = 8
+        var tree: [zkMetal.M31Digest] = []
+        tree.reserveCapacity(2 * numLeaves)
+
+        // Add leaves
+        for i in 0..<numLeaves {
+            let values = Array(digests[i * nodeSize..<(i + 1) * nodeSize])
+            tree.append(zkMetal.M31Digest(values: values))
+        }
+
+        // Build internal nodes
+        var levelSize = numLeaves
+        while levelSize > 1 {
+            for i in stride(from: 0, to: levelSize, by: 2) {
+                let left = tree[i]
+                let right = i + 1 < levelSize ? tree[i + 1] : tree[i]
+                tree.append(zkMetal.M31Digest(values: poseidon2M31Hash(left: left.values, right: right.values)))
+            }
+            levelSize = (levelSize + 1) / 2
+        }
+
+        return tree
+    }
+
+    /// Generate proof from a flattened tree (CPU fallback).
+    private func generateProofFromTree(tree: [zkMetal.M31Digest], n: Int, index: Int) -> [zkMetal.M31Digest] {
+        var path = [zkMetal.M31Digest]()
+        var levelStart = 0
+        var levelSize = n
+        var idx = index
+
+        while levelSize > 1 {
+            let sibIdx = idx ^ 1
+            path.append(tree[levelStart + sibIdx])
+            levelStart += levelSize
+            levelSize /= 2
+            idx /= 2
+        }
+
+        return path
+    }
 }
