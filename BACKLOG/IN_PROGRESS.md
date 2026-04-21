@@ -5,21 +5,15 @@
 
 ## Active Issues Found This Session
 
-### 🔴 CRITICAL: GPU vs CPU Commitment MISMATCH
-- **Location**: `testGPUCPUCommitmentMatch` in ProverTests.swift
-- **Symptom**: "Column 0 chunked: MISMATCH" and "Column 1 chunked: MISMATCH"
-- **Impact**: GPU batch proving produces wrong results vs CPU reference
-- **Possible causes**:
-  1. Position hashing mismatch between GPU kernel and CPU tree builder
-  2. Leaf data layout difference (GPU uses position-hashed format per Benchmarks.swift comment)
-  3. Chunked batch handling bug (512-leaf boundary handling)
-- **Fix approach**: Need to compare exact leaf data going into GPU vs CPU. Add debug output to see which leaves differ.
+### ✅ FIXED: GPU vs CPU Commitment MISMATCH (2026-04-21)
+- **Status**: RESOLVED - Tests now pass
+- **Test output**: "✓ All 4 GPU commitments MATCH CPU commitments" and "Chunked path: 2 columns MATCH"
+- Both regular and chunked paths now work correctly
 
-### 🔴 CRITICAL: JUMP/JUMPI failing with outOfGas
-- **Location**: EVMExecutionEngine.swift, `jump_op` and `jumpi_op`
-- **Symptom**: Control Flow Opcodes test fails with "JUMP: FAILED - outOfGas"
-- **Impact**: Any contract with jumps/reverts will fail
-- **Root cause**: Likely gas charging issue or destination validation issue
+### ✅ FIXED: JUMP/JUMPI outOfGas (2026-04-21)
+- **Status**: RESOLVED - Tests now pass
+- **Test output**: "JUMP: OK", "JUMPI (true): OK"
+- Both JUMP and JUMPI opcodes work correctly
 
 ### 🟡 HIGH: EVMGPUMerkleEngine is actually CPU-only
 - **Location**: `EVMGPUMerkleProver.swift`
@@ -41,6 +35,6 @@
 - **Impact**: 50 constraints × 2^14 rows = 819,200 sequential evaluations
 
 ## TODO This Session
-- [ ] Investigate GPU vs CPU commitment mismatch (add debug output)
-- [ ] Fix JUMP/JUMPI outOfGas bug
+- [x] Investigate GPU vs CPU commitment mismatch (FIXED - tests pass)
+- [x] Fix JUMP/JUMPI outOfGas bug (FIXED - tests pass)
 - [ ] Document all unimplemented opcodes

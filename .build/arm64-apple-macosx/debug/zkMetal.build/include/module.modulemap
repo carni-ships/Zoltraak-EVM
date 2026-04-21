@@ -1,3 +1,0 @@
-module zkMetal {
-    header "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/debug/zkMetal.build/include/zkMetal-Swift.h"
-}

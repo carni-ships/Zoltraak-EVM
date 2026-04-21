@@ -357,13 +357,13 @@ public final class EVMetalBlockProver {
         // Phase 7: FRI proof using GPU Circle STARK
         let friStart = CFAbsoluteTimeGetCurrent()
 
-        // Use GPU Circle STARK prover directly
+        // Use GPU Circle STARK prover
         var starkProofData: Data
         var friMs: Double
         if let gpu = gpuProver, gpu.gpuAvailable {
             print("[BlockProver] Using GPU Circle STARK prover...")
             fflush(stdout)
-            // Just use the standard prove() method
+            // Standard prove - trace is regenerated (placeholder)
             let gpuResult = try gpu.prove(air: air)
             print("[BlockProver] GPU Circle STARK done: \(String(format: "%.1f", gpuResult.totalTimeSeconds * 1000))ms total")
             print("  - Commit: \(String(format: "%.1f", gpuResult.commitTimeSeconds * 1000))ms")

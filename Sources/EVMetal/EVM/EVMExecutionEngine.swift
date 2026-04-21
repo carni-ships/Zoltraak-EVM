@@ -797,6 +797,11 @@ public final class EVMExecutionEngine: Sendable {
         }
 
         state.pc = pc + byteCount
+
+        // Check stack overflow before pushing
+        guard state.stack.stackHeight < maxStackDepth else {
+            throw EVMExecutionError.stackOverflow
+        }
         state.stack.push(M31Word(bytes: bytes))
     }
 

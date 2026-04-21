@@ -1,3 +1,0 @@
-module EVMetalPackageTests {
-    header "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/release/EVMetalPackageTests.build/include/EVMetalPackageTests-Swift.h"
-}

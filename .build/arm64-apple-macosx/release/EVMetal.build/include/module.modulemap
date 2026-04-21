@@ -1,3 +1,0 @@
-module EVMetal {
-    header "/Users/carnation/Documents/Claude/EVMetal/.build/arm64-apple-macosx/release/EVMetal.build/include/EVMetal-Swift.h"
-}

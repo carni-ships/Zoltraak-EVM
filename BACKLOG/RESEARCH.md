@@ -43,10 +43,14 @@ STARK Proof
 
 ## Critical Issues
 
-### 1. GPU vs CPU Commitment MISMATCH
-**Status**: 🔴 CRITICAL
+### 1. ✅ GPU vs CPU Commitment MISMATCH - FIXED (2026-04-21)
+**Status**: ✅ RESOLVED
 
-`testGPUCPUCommitmentMatch` reports mismatches on columns 0 and 1 chunked.
+The GPU vs CPU commitment test now passes. Both regular and chunked paths work correctly.
+
+Test output:
+- "✓ All 4 GPU commitments MATCH CPU commitments"
+- "Chunked path: 2 columns MATCH"
 
 **Root cause hypothesis**: The CPU reference test (lines 700-735 in ProverTests.swift) builds the reference by calling `cpuProver.hashLeavesBatchPerColumn(allValues: flatValues, numColumns: 1, countPerColumn: evalLen)` — but then builds the tree treating the digests as pre-hashed leaves (8 M31 per leaf). The GPU path in `commitTraceColumnsGPU` (line 142) calls `leafHashEngine.hashLeavesBatchPerColumn` with `numColumns: numColumns` (not 1). The CPU reference computes ONE tree (numColumns=1) while GPU computes 4 separate trees (numColumns=4), so the position hashing differs.
 
@@ -54,8 +58,15 @@ STARK Proof
 
 The chunked test (line 778-840) creates `traceLDEs` where each leaf is 8 M31 elements (pre-hashed format), but `commitTraceColumnsGPU` expects individual M31 values and does position hashing internally. This is a data format mismatch in the test, not the code.
 
-### 2. JUMP/JUMPI Failing with outOfGas
-**Status**: 🔴 CRITICAL
+### 2. ✅ JUMP/JUMPI outOfGas - FIXED (2026-04-21)
+**Status**: ✅ RESOLVED
+
+The JUMP and JUMPI opcodes now work correctly. All control flow tests pass.
+
+Test output:
+- "JUMP: OK"
+- "JUMPI (true): OK"
+- "JUMPDEST: OK"
 
 `jump_op` (line 496) charges 8 gas, then pops destination, then sets PC. The gas charge happens AFTER the pop. If gas is insufficient, `chargeGas` calls `revert(message: "Out of gas")` which sets `state.running = false` AND `state.reverted = true`. Then `jump_op` returns. But the execution engine checks `state.running` at line 66, so the loop exits.
 

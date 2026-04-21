@@ -773,6 +773,7 @@ public enum GPUProverError: Error {
     case missingKernel
     case gpuError(String)
     case commandBufferError(String)
+    case invalidDimensions(String)
 
     public var description: String {
         switch self {
@@ -788,6 +789,8 @@ public enum GPUProverError: Error {
             return "GPU error: \(msg)"
         case .commandBufferError(let msg):
             return "GPU command buffer error: \(msg)"
+        case .invalidDimensions(let msg):
+            return "Invalid dimensions: \(msg)"
         }
     }
 }

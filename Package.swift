@@ -15,7 +15,7 @@ let package = Package(
             targets: ["EVMetalRunner"])
     ],
     dependencies: [
-        .package(path: "../zkMetal")
+        .package(path: "../zkMetal"),
     ],
     targets: [
         .target(
