@@ -20,14 +20,23 @@ ZOLTRAAK_ART="
 ${CYAN}
 ╔══════════════════════════════════════════════════════════╗
 ║                                                          ║
-║   ${MAGENTA}████  ${MAGENTA}       ${MAGENTA}████  ${MAGENTA}████  ${MAGENTA} ████  ${MAGENTA}████  ${MAGENTA}████  ${MAGENTA}████${CYAN}     ║
-║   ${MAGENTA}████  ${MAGENTA}       ${MAGENTA}████  ${MAGENTA}████  ${MAGENTA}████  ${MAGENTA}████  ${MAGENTA}████  ${MAGENTA}████${CYAN}     ║
-║   ${MAGENTA} ████ ${MAGENTA}       ${MAGENTA}██    ${MAGENTA}   ██ ${MAGENTA}████  ${MAGENTA}██    ${MAGENTA}██    ${MAGENTA}   ██${CYAN}     ║
-║   ${MAGENTA}   ████${MAGENTA}       ${MAGENTA}██    ${MAGENTA}   ██ ${MAGENTA}████  ${MAGENTA}██    ${MAGENTA}████  ${MAGENTA}  ████${CYAN}     ║
-║   ${MAGENTA}   ████${MAGENTA}       ${MAGENTA}██    ${MAGENTA}   ██ ${MAGENTA}████  ${MAGENTA}██    ${MAGENTA}████  ${MAGENTA} ████ ${CYAN}     ║
-║   ${MAGENTA}██████${MAGENTA}       ${MAGENTA}████  ${MAGENTA}████  ${MAGENTA}████  ${MAGENTA}████  ${MAGENTA}████  ${MAGENTA}██████${CYAN}     ║
-║                                                          ║
-║              ${YELLOW}EVM \u{2022} STARK \u{2022} GPU${CYAN}                          ║
+║   ${MAGENTA}  ..      s                                               ..     ${CYAN}  ║
+║   ${MAGENTA} :~\"\"\"88hx.                x .d88\"      :8                                         < .z@8\"\` ${CYAN}  ║
+║   ${MAGENTA}.~      ?888x          u.    5888R      .88       .u    .                            !@88E ${CYAN}  ║
+║   ${MAGENTA} X       '8888k   ...ue888b   '888R     :888ooo  .d88B :@8c        u           u      '888E   u ${CYAN}  ║
+║   ${MAGENTA}   H8h    8888X   888R Y888r   888R   -*8888888 =\"8888f8888r    us888u.     us888u.    888E u@8NL ${CYAN}  ║
+║   ${MAGENTA}  ?888~   8888    888R I888>   888R     8888      4888>'88\"  .@88 \"8888\" .@88 \"8888\"   888E\`\"88*\" ${CYAN}  ║
+║   ${MAGENTA}   %X   .X8*\"     888R I888>   888R     8888      4888> '    9888  9888  9888  9888    888E .dN. ${CYAN}  ║
+║   ${MAGENTA}   .-\"\`\"tnx.     888R I888>   888R     8888      4888>      9888  9888  9888  9888    888E~8888 ${CYAN}  ║
+║   ${MAGENTA}  :~      8888.  u8888cJ888    888R    .8888Lu=  .d888L .+   9888  9888  9888  9888    888E '888& ${CYAN}  ║
+║   ${MAGENTA}  ~       X8888   \"*888*P\"    .888B .  ^%888*    ^\"8888*\"    9888  9888  9888  9888    888E  9888. ${CYAN}  ║
+║   ${MAGENTA} ...      '8888L    'Y\"       ^*888%     'Y\"        \"Y\"      \"888*\"\"888\" \"888*\"\"888\" '\"888*\" 4888\" ${CYAN}  ║
+║   ${MAGENTA}'888k     '8888f                \"%                            ^Y\"   ^Y'   ^Y\"   ^Y'     \"\"    \"\" ${CYAN}  ║
+║   ${MAGENTA} 8888>    <8888                                                                   ${CYAN}  ║
+║   ${MAGENTA} \`888>    X888~                                                                   ${CYAN}  ║
+║   ${MAGENTA}  '\"88...x8\"\"                                                                     ${CYAN}  ║
+║   ${MAGENTA}                                                                                         ${CYAN}  ║
+║   ${MAGENTA}                           EVM \u{2022} STARK \u{2022} GPU${CYAN}                                           ${MAGENTA}  ║
 ║                                                          ║
 ╚══════════════════════════════════════════════════════════╝
 ${NC}"
