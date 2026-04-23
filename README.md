@@ -63,6 +63,43 @@ See [DOCUMENTATION/LiveEthereumProving.md](DOCUMENTATION/LiveEthereumProving.md)
 | `EVMGPUCircleSTARKProverEngine` | GPU Circle STARK proving |
 | `EVMVerifier` | Proof verification |
 | `EVMGPUMerkleProver` | GPU Merkle tree construction |
+| `EVMExecutionEngine` | GPU-accelerated EVM bytecode execution |
+| `EVMAIR` | AIR constraints (180 trace columns) |
+
+## Trace Format
+
+The EVM trace uses **180 columns** to capture execution state:
+
+| Columns | Content |
+|---------|---------|
+| 0-2 | PC, Gas (high/low split) |
+| 3-147 | Stack (16 slots × ~9 limbs) |
+| 155-158 | Memory address, opcode, flags |
+| 159-162 | Opcode type flags |
+| 163 | Call depth |
+| 164-166 | State root |
+| 167+ | Padding/special purpose |
+
+## Performance Benchmarks
+
+| Metric | Value |
+|--------|-------|
+| GPU Batch Merkle | 201x speedup vs CPU |
+| GPU Leaf Hash | 83x speedup |
+| GPU NTT/LDE | ~300ms for 180 columns |
+| GPU FRI | 22.8ms per fold |
+| GPU Constraint Eval | 714ms for 134 tx block |
+| Real blocks | ~10s/block (meets 12s target) |
+
+### Phase Breakdown (134 tx block)
+
+| Phase | Time | % of Total |
+|-------|------|------------|
+| GPU EVM Execution | 63.6ms | 0.6% |
+| Trace building | 28.0ms | 0.3% |
+| CPU LDE (zero-padding) | 5,130ms | 50.2% |
+| GPU Merkle Commit | 4,840ms | 47.3% |
+| Constraint Evaluation | 136ms | 1.3% |
 
 ## Proving Pipeline
 
