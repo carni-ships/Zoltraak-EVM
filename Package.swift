@@ -16,6 +16,7 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../zkMetal"),
+        .package(url: "https://github.com/apple/swift-testing.git", from: "0.11.0"),
     ],
     targets: [
         .target(
@@ -35,7 +36,7 @@ let package = Package(
         ),
         .testTarget(
             name: "ZoltraakTests",
-            dependencies: ["Zoltraak"],
+            dependencies: ["Zoltraak", .product(name: "Testing", package: "swift-testing")],
             path: "Tests/ZoltraakTests"
         ),
     ]
