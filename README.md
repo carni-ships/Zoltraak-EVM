@@ -13,19 +13,19 @@
 ## Quick Start
 
 ```bash
-# Build
+# Clone the repo
+git clone https://github.com/carbearnara/EVMetal.git
+cd EVMetal
+
+# Initialize submodules (needed for foundry/zkMetal dependencies)
+git submodule update --init --recursive
+
+# Build (or use the build.sh script: ./build.sh)
 swift build
 
-# Run tests
-swift test
-
-# Live Ethereum proving
-./EVMetalRunner eth-live 1        # Prove 1 block
-./EVMetalRunner eth-live-cont    # Continuous proving
-
-# Benchmarks
-./EVMetalRunner benchmarks
-./EVMetalRunner full-compare
+# Run the binary
+./.build/release/EVMetalRunner benchmarks
+./.build/release/EVMetalRunner eth-live 1
 ```
 
 ## Architecture
