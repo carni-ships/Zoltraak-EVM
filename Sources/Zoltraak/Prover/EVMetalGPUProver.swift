@@ -87,7 +87,7 @@ public final class ZoltraakGPUProver {
     // MARK: - Private State
 
     private let config: Config
-    private let leafHashEngine: ZoltraakLeafHashEngine
+    private var leafHashEngine: ZoltraakLeafHashEngine?  // nil if GPU unavailable
     private let cpuProver: ZoltraakCPUMerkleProver
     private var merkleEngine: EVMGPUMerkleEngine?
     private var gpuTreeEngine: Poseidon2M31Engine?  // zkMetal's GPU tree building engine
@@ -98,8 +98,18 @@ public final class ZoltraakGPUProver {
     /// - Parameter config: Prover configuration. Uses `.standard` if not specified.
     public init(config: Config = .standard) {
         self.config = config
-        self.leafHashEngine = try! ZoltraakLeafHashEngine()
-        // self.leafHashEngine.useSIMDCooperative = true  // Disabled - kernel has issues
+
+        // Initialize leaf hash engine with graceful degradation
+        // In release builds, Metal compiler may fail to compile kernels
+        if let engine = try? ZoltraakLeafHashEngine() {
+            self.leafHashEngine = engine
+            print("✓ GPU Leaf Hash Engine initialized successfully")
+        } else {
+            self.leafHashEngine = nil
+            print("✗ GPU Leaf Hash Engine initialization failed - will use CPU leaf hashing")
+        }
+
+        // self.leafHashEngine?.useSIMDCooperative = true  // Disabled - kernel has issues
         self.cpuProver = ZoltraakCPUMerkleProver()
         self.merkleEngine = try? EVMGPUMerkleEngine()
         do {
@@ -304,10 +314,14 @@ public final class ZoltraakGPUProver {
     /// Try GPU leaf hashing with error handling.
     /// Returns the same format as hashLeavesBatchPerColumn.
     private func tryGPULeafHash(flatValues: [M31], numColumns: Int, countPerColumn: Int) throws -> [[M31]] {
+        guard let engine = leafHashEngine else {
+            throw GPUProverError.gpuError("GPU leaf hash engine not available")
+        }
+
         print("    [GPU Prover] tryGPULeafHash: flatValues count=\(flatValues.count), numColumns=\(numColumns), countPerColumn=\(countPerColumn)")
         print("    [GPU Prover] flatValues[0..<8]: \(flatValues.prefix(8).map { $0.v })")
 
-        let result = try leafHashEngine.hashLeavesBatchPerColumn(
+        let result = try engine.hashLeavesBatchPerColumn(
             allValues: flatValues,
             numColumns: numColumns,
             countPerColumn: countPerColumn
@@ -602,7 +616,10 @@ public final class ZoltraakGPUProver {
     /// - Returns: The root digest of the Merkle tree.
     /// - Throws: Error if GPU operations fail.
     public func buildTreeGPU(values: [M31], count: Int) throws -> zkMetal.M31Digest {
-        return try leafHashEngine.buildMerkleTree(values: values, numLeaves: count)
+        guard let engine = leafHashEngine else {
+            throw GPUProverError.gpuError("GPU leaf hash engine not available")
+        }
+        return try engine.buildMerkleTree(values: values, numLeaves: count)
     }
 
     /// Hash individual M31 values with their position to create leaf digests.
@@ -614,8 +631,11 @@ public final class ZoltraakGPUProver {
     /// - Returns: Array of M31 digests (8 M31 elements per input value).
     /// - Throws: Error if GPU operations fail.
     public func hashLeavesWithPosition(values: [M31]) throws -> [M31] {
+        guard let engine = leafHashEngine else {
+            throw GPUProverError.gpuError("GPU leaf hash engine not available")
+        }
         let positions = (0..<values.count).map { UInt32($0) }
-        return try leafHashEngine.hashLeavesWithPosition(values: values, positions: positions)
+        return try engine.hashLeavesWithPosition(values: values, positions: positions)
     }
 
     // MARK: - Hybrid Commitment (CPU Hash + GPU Tree)
