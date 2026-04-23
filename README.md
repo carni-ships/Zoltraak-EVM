@@ -1,6 +1,14 @@
 # EVMetal
 
-GPU-accelerated ZK proving for Ethereum blocks using Circle STARK proofs over the M31 field.
+**GPU-accelerated ZK proving for Ethereum blocks.** Generate STARK proofs for Ethereum transactions in ~10 seconds using Apple Silicon GPUs — fast enough to keep up with Ethereum's 12-second block time.
+
+## Key Highlights
+
+- **Real-time proving**: ~10s/block on Apple Silicon M3 Max, verified in ~5ms
+- **Circle STARK**: Efficient proof system over the Mersenne-31 field with Poseidon2 hashing
+- **Unified block proofs**: Single proof for all transactions in a block (not one-per-tx)
+- **Live Ethereum mode**: `./EVMetalRunner eth-live` fetches and proves real mainnet blocks
+- **On-chain verification**: Solidity verifiers for BN254 pairing checks (~300k gas)
 
 ## Quick Start
 
@@ -68,7 +76,7 @@ See [DOCUMENTATION/LiveEthereumProving.md](DOCUMENTATION/LiveEthereumProving.md)
 
 ## Technical Details
 
-- **Field**: M31 (BabyBear) - ~31-bit prime
+- **Field**: M31 (Mersenne-31) - 2^31 - 1
 - **Hash**: Poseidon2-M31 for Merkle commitments
 - **Proof**: Circle STARK over M31
 - **Security**: ~100-bit soundness (configurable)
@@ -92,7 +100,6 @@ On-chain BN254 verifiers in `contracts/`:
 ## Dependencies
 
 - [zkMetal](https://github.com/carbearnara/zkMetal) - Circle STARK and Nova infrastructure
-- [NeonFieldOps](https://github.com/carbearnara/NeonFieldOps) - M31 field operations
 
 ## License
 
