@@ -652,6 +652,7 @@ public struct BlockAIR: CircleAIR {
             fflush(stdout)
         } catch {
             print("[BlockAIR] GPU merkleCommit failed: \(error), falling back to CPU")
+            fflush(stdout)
             // Fallback to CPU
             for colIdx in 0..<numColumns {
                 if colIdx % 20 == 0 {
