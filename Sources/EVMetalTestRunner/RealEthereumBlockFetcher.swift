@@ -352,7 +352,10 @@ public struct RealEthereumBlockFetcher {
     }
 
     /// Benchmark with real Ethereum block using unified block proving (Phase 3)
-    public static func benchmarkRealBlockUnified(blockNumber: String? = nil) async {
+    public static func benchmarkRealBlockUnified(
+        blockNumber: String? = nil,
+        config: BatchProverConfig = .unifiedBlock
+    ) async {
         print("""
         ╔══════════════════════════════════════════════════════════════════╗
         ║       Real Ethereum Block - Unified Proving (Phase 3)              ║
@@ -363,7 +366,7 @@ public struct RealEthereumBlockFetcher {
         """)
 
         do {
-            let config = RPCConfig.publicNode  // Use publicNode (most reliable)
+            let rpcConfig = RPCConfig.publicNode  // Use publicNode (most reliable)
 
             // Fetch block
             let block: EthereumBlock
@@ -377,10 +380,10 @@ public struct RealEthereumBlockFetcher {
                     hexNumber = number
                 }
                 print("Fetching block #\(number) (hex: \(hexNumber))...")
-                block = try fetchBlock(number: hexNumber, config: config)
+                block = try fetchBlock(number: hexNumber, config: rpcConfig)
             } else {
                 print("Fetching latest block...")
-                block = try fetchLatestBlock(config: config)
+                block = try fetchLatestBlock(config: rpcConfig)
             }
 
             print("✓ Block fetched: #\(block.number)")
@@ -430,8 +433,14 @@ public struct RealEthereumBlockFetcher {
             // Run unified block proving
             let startTime = CFAbsoluteTimeGetCurrent()
 
-            let batchConfig = BatchProverConfig.unifiedBlock
-            let batchProver = EVMBatchProver(config: batchConfig)
+            // Use the provided prover config (supports compression settings)
+            let batchProver = EVMBatchProver(config: config)
+
+            // Print compression settings
+            print("  Compression: \(config.provingColumnCount) columns in FRI")
+            if config.provingColumnCount < 180 {
+                print("  Speedup estimate: ~\(180/config.provingColumnCount)x from column reduction")
+            }
 
             let batchProof = try batchProver.proveBatch(transactions: evmTransactions)
 
@@ -465,9 +474,12 @@ public struct RealEthereumBlockFetcher {
 
     /// Benchmark with real Ethereum block using unified block proving (Phase 3)
     /// Synchronous version for CLI compatibility
-    public static func benchmarkRealBlockUnifiedSync(blockNumber: String? = nil) {
+    public static func benchmarkRealBlockUnifiedSync(
+        blockNumber: String? = nil,
+        config: BatchProverConfig = .unifiedBlock
+    ) {
         Task {
-            await benchmarkRealBlockUnified(blockNumber: blockNumber)
+            await benchmarkRealBlockUnified(blockNumber: blockNumber, config: config)
         }
     }
 

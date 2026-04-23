@@ -80,6 +80,18 @@ public struct LeafHashOptimizations {
             let h2h3Speedup = baselineTime / h2h3Time
             print("  H2+H3 (coalesced+SM):   \(String(format: "%8.2fms", h2h3Time)) (\(String(format: "%.2fx", h2h3Speedup)))")
 
+            // Test H4 precomputation optimization
+            engine.optimizationLevel = .precomputed
+            let t1b = CFAbsoluteTimeGetCurrent()
+            _ = try engine.hashLeavesAutoOptimized(
+                allValues: flatValues,
+                numColumns: numColumns,
+                countPerColumn: numLeaves
+            )
+            let h4Time = (CFAbsoluteTimeGetCurrent() - t1b) * 1000
+            let h4Speedup = baselineTime / h4Time
+            print("  H2+H3+H4 (precomputed): \(String(format: "%8.2fms", h4Time)) (\(String(format: "%.2fx", h4Speedup)))")
+
             // Test combined
             engine.optimizationLevel = .combined
             let t2 = CFAbsoluteTimeGetCurrent()
@@ -90,7 +102,7 @@ public struct LeafHashOptimizations {
             )
             let combinedTime = (CFAbsoluteTimeGetCurrent() - t2) * 1000
             let combinedSpeedup = baselineTime / combinedTime
-            print("  Combined (all opts):   \(String(format: "%8.2fms", combinedTime)) (\(String(format: "%.2fx", combinedSpeedup)))")
+            print("  Combined (H2+H3+H4+H5): \(String(format: "%8.2fms", combinedTime)) (\(String(format: "%.2fx", combinedSpeedup)))")
 
         } catch {
             print("  Benchmark failed: \(error)")

@@ -1,4 +1,5 @@
 import Foundation
+import Metal
 import zkMetal
 import CryptoKit
 
@@ -38,6 +39,17 @@ public final class EVMExecutionEngine: Sendable {
     // Each operation costs at least 2 gas, so we can estimate max rows
     private var estimatedTraceCapacity: Int = 0
 
+    // MARK: - Batch Keccak Processing
+
+    /// Batch Keccak processor for GPU-accelerated KECCAK256 operations
+    private var batchKeccakProcessor: BatchKeccakProcessor? = nil
+
+    /// Flag to enable batch collection during execution
+    private var isBatchKeccakEnabled: Bool = false
+
+    /// Map from trace index to the position in batch processor for result injection
+    private var keccakBatchIndices: [Int: Int] = [:]
+
     public init(block: BlockContext = BlockContext(), tx: TransactionContext = TransactionContext()) {
         self.block = block
         self.tx = tx
@@ -52,6 +64,240 @@ public final class EVMExecutionEngine: Sendable {
         tx: TransactionContext = TransactionContext()
     ) -> EVMExecutionEngine {
         return EVMExecutionEngine(block: block, tx: tx)
+    }
+
+    // MARK: - GPU Execution Support
+
+    /// GPU-accelerated EVM interpreter for parallel transaction execution
+    private static var gpuInterpreter: GPUEVMInterpreter? = nil
+
+    /// Initialize GPU interpreter (lazy loading)
+    private static func getOrCreateGPUInterpreter() throws -> GPUEVMInterpreter {
+        if let existing = gpuInterpreter {
+            return existing
+        }
+        let interpreter = try GPUEVMInterpreter()
+        gpuInterpreter = interpreter
+        return interpreter
+    }
+
+    /// Execute using GPU acceleration if available and beneficial
+    /// Falls back to CPU execution if GPU is not available or fails
+    ///
+    /// - Parameters:
+    ///   - code: Contract bytecode to execute
+    ///   - calldata: Input data for the call
+    ///   - value: ETH value transferred
+    ///   - gasLimit: Maximum gas for execution
+    ///   - block: Block context
+    ///   - tx: Transaction context
+    ///   - forceCPU: If true, skip GPU and use CPU
+    /// - Returns: Execution result with trace
+    public static func executeGPU(
+        code: [UInt8],
+        calldata: [UInt8] = [],
+        value: M31Word = .zero,
+        gasLimit: UInt64 = 30_000_000,
+        block: BlockContext = BlockContext(),
+        tx: TransactionContext = TransactionContext(),
+        forceCPU: Bool = false
+    ) throws -> EVMExecutionResult {
+        // Fall back to CPU if forced or if batch size is too small for GPU benefit
+        if forceCPU || code.count < 100 {
+            return try EVMExecutionEngine(block: block, tx: tx).executeInternal(
+                code: code,
+                calldata: calldata,
+                value: value,
+                gasLimit: gasLimit,
+                block: block,
+                tx: tx
+            )
+        }
+
+        do {
+            // Try GPU execution
+            let gpuEngine = try getOrCreateGPUInterpreter()
+            let input = GPUEVMInterpreter.TransactionInput(
+                code: code,
+                calldata: calldata,
+                value: value,
+                gasLimit: gasLimit,
+                address: M31Word(low64: 1),
+                caller: tx.origin
+            )
+
+            let result = try gpuEngine.executeBatch(
+                transactions: [input],
+                blockContext: block,
+                txContext: tx
+            )
+
+            // Convert GPU result to standard result format
+            return convertGPUResult(result[0], gasLimit: gasLimit)
+        } catch {
+            // Fall back to CPU on GPU error
+            print("[EVMExecutionEngine] GPU execution failed, falling back to CPU: \(error)")
+            return try EVMExecutionEngine(block: block, tx: tx).executeInternal(
+                code: code,
+                calldata: calldata,
+                value: value,
+                gasLimit: gasLimit,
+                block: block,
+                tx: tx
+            )
+        }
+    }
+
+    /// Execute multiple transactions on GPU in parallel
+    ///
+    /// - Parameters:
+    ///   - transactions: Array of transaction inputs
+    ///   - blockContext: Block context
+    ///   - txContext: Transaction context
+    /// - Returns: Array of execution results
+    public static func executeGPUBatch(
+        transactions: [(code: [UInt8], calldata: [UInt8], value: M31Word, gasLimit: UInt64)],
+        blockContext: BlockContext,
+        txContext: TransactionContext
+    ) throws -> [EVMExecutionResult] {
+        guard transactions.count <= GPUEVMInterpreter.maxBatchSize else {
+            throw EVMExecutionError.invalidCode(reason: "Batch size exceeds GPU capacity")
+        }
+
+        // Convert to GPU inputs
+        let inputs = transactions.map { tx in
+            GPUEVMInterpreter.TransactionInput(
+                code: tx.code,
+                calldata: tx.calldata,
+                value: tx.value,
+                gasLimit: tx.gasLimit,
+                address: M31Word(low64: 1),
+                caller: txContext.origin
+            )
+        }
+
+        do {
+            let gpuEngine = try getOrCreateGPUInterpreter()
+            let results = try gpuEngine.executeBatch(
+                transactions: inputs,
+                blockContext: blockContext,
+                txContext: txContext
+            )
+
+            // Convert all GPU results to standard format
+            return zip(results, transactions).map { result, tx in
+                convertGPUResult(result, gasLimit: tx.gasLimit)
+            }
+        } catch {
+            // Fall back to parallel CPU execution
+            print("[EVMExecutionEngine] GPU batch execution failed, falling back to CPU: \(error)")
+            return try executeBatchCPU(
+                transactions: transactions,
+                blockContext: blockContext,
+                txContext: txContext
+            )
+        }
+    }
+
+    /// Parallel CPU fallback for batch execution
+    private static func executeBatchCPU(
+        transactions: [(code: [UInt8], calldata: [UInt8], value: M31Word, gasLimit: UInt64)],
+        blockContext: BlockContext,
+        txContext: TransactionContext
+    ) throws -> [EVMExecutionResult] {
+        let numWorkers = max(1, ProcessInfo.processInfo.activeProcessorCount)
+        let queue = DispatchQueue(label: "com.evmetal.batchcpu", attributes: .concurrent)
+        let group = DispatchGroup()
+
+        var results: [Int: EVMExecutionResult] = [:]
+        var errors: [Int: Error] = [:]
+        let lock = NSLock()
+
+        // Execute transactions in parallel using thread pool
+        for (idx, tx) in transactions.enumerated() {
+            group.enter()
+            queue.async {
+                do {
+                    let result = try EVMExecutionEngine(block: blockContext, tx: txContext).executeInternal(
+                        code: tx.code,
+                        calldata: tx.calldata,
+                        value: tx.value,
+                        gasLimit: tx.gasLimit,
+                        block: blockContext,
+                        tx: txContext
+                    )
+                    lock.lock()
+                    results[idx] = result
+                    lock.unlock()
+                } catch {
+                    lock.lock()
+                    errors[idx] = error
+                    lock.unlock()
+                }
+                group.leave()
+            }
+        }
+
+        group.wait()
+
+        // Check for errors
+        if let firstError = errors.values.first {
+            throw firstError
+        }
+
+        // Return results in original order
+        return (0..<transactions.count).map { results[$0]! }
+    }
+
+    /// Convert GPU execution result to standard EVMExecutionResult format
+    private static func convertGPUResult(
+        _ gpuResult: GPUEVMInterpreter.ExecutionResult,
+        gasLimit: UInt64
+    ) -> EVMExecutionResult {
+        let initialState = EVMStateSnapshot(
+            pc: 0,
+            gas: gasLimit,
+            gasRefund: 0,
+            stackHeight: 0,
+            memorySize: 0,
+            callDepth: 0,
+            stateRoot: .zero,
+            selfBalance: .zero,
+            running: true,
+            reverted: false
+        )
+
+        let finalState: EVMStateSnapshot
+        if let lastRow = gpuResult.traceRows.last {
+            finalState = EVMStateSnapshot(
+                pc: lastRow.pc,
+                gas: gpuResult.gasUsed,
+                gasRefund: 0,
+                stackHeight: lastRow.stackHeight,
+                memorySize: lastRow.memorySize,
+                callDepth: lastRow.callDepth,
+                stateRoot: lastRow.stateRoot,
+                selfBalance: .zero,
+                running: lastRow.isRunning,
+                reverted: lastRow.isReverted
+            )
+        } else {
+            finalState = initialState
+        }
+
+        return EVMExecutionResult(
+            trace: EVMExecutionTrace(
+                rows: gpuResult.traceRows,
+                initialState: initialState,
+                finalState: finalState,
+                gasUsed: gpuResult.gasUsed,
+                returnData: gpuResult.returnData,
+                reverted: gpuResult.reverted
+            ),
+            memoryTrace: MemoryTrace(accesses: []),
+            storageTrace: StorageTrace(accesses: []),
+            callTrace: []
+        )
     }
 
     // MARK: - Public API
@@ -82,7 +328,8 @@ public final class EVMExecutionEngine: Sendable {
         value: M31Word = .zero,
         gasLimit: UInt64 = 30_000_000,
         block: BlockContext,
-        tx: TransactionContext
+        tx: TransactionContext,
+        enableBatchKeccak: Bool = true
     ) throws -> EVMExecutionResult {
         // Estimate trace capacity based on gas limit
         // Conservative estimate: 1 row per 100 gas units
@@ -95,6 +342,17 @@ public final class EVMExecutionEngine: Sendable {
         callEntries.reserveCapacity(10)  // Most txs have <10 calls
         memoryTimestamp = 0
         storageTimestamp = 0
+
+        // Initialize batch Keccak processor for GPU-accelerated KECCAK256
+        if enableBatchKeccak {
+            batchKeccakProcessor = try? BatchKeccakProcessor()
+            batchKeccakProcessor?.startCollecting()
+            isBatchKeccakEnabled = true
+            keccakBatchIndices = [:]
+        } else {
+            isBatchKeccakEnabled = false
+            batchKeccakProcessor = nil
+        }
 
         // Initialize state
         var state = EVMState(block: block, tx: tx)
@@ -145,30 +403,46 @@ public final class EVMExecutionEngine: Sendable {
             )
         }
 
+        // Process batch Keccak if enabled and inject results into trace
+        var processedHashes: [Int: [UInt8]] = [:]
+        if isBatchKeccakEnabled, let processor = batchKeccakProcessor {
+            do {
+                let batchResult = try processor.processBatch()
+                processedHashes = batchResult.hashes
+            } catch {
+                // Fall back to CPU if GPU fails - results will be computed individually
+                print("WARNING: Batch Keccak processing failed, using CPU fallback: \(error)")
+            }
+        }
+
         // Build final trace
         let finalSnapshot = EVMStateSnapshot(from: state)
         let gasUsed = gasLimit - state.gas
 
-        return EVMExecutionResult(
-            trace: EVMExecutionTrace(
-                rows: traceRows,
-                initialState: EVMStateSnapshot(
-                    pc: 0,
-                    gas: gasLimit,
-                    gasRefund: 0,
-                    stackHeight: 0,
-                    memorySize: 0,
-                    callDepth: 0,
-                    stateRoot: .zero,
-                    selfBalance: .zero,
-                    running: true,
-                    reverted: false
-                ),
-                finalState: finalSnapshot,
-                gasUsed: gasUsed,
-                returnData: state.currentFrame.returnData,
-                reverted: state.reverted
+        // Create trace with processed Keccak hashes injected
+        let trace = EVMExecutionTrace(
+            rows: traceRows,
+            initialState: EVMStateSnapshot(
+                pc: 0,
+                gas: gasLimit,
+                gasRefund: 0,
+                stackHeight: 0,
+                memorySize: 0,
+                callDepth: 0,
+                stateRoot: .zero,
+                selfBalance: .zero,
+                running: true,
+                reverted: false
             ),
+            finalState: finalSnapshot,
+            gasUsed: gasUsed,
+            returnData: state.currentFrame.returnData,
+            reverted: state.reverted,
+            keccakHashes: processedHashes
+        )
+
+        return EVMExecutionResult(
+            trace: trace,
             memoryTrace: MemoryTrace(accesses: memoryAccesses),
             storageTrace: StorageTrace(accesses: storageAccesses),
             callTrace: callEntries
@@ -1233,7 +1507,22 @@ public final class EVMExecutionEngine: Sendable {
             memoryBytes.append(state.memory.loadByte(offset: offsetInt + i))
         }
 
+        // Get current trace index for batch processing
+        let traceIndex = traceRows.count
+
+        // Record this Keccak call for batch GPU processing
+        if isBatchKeccakEnabled, let processor = batchKeccakProcessor {
+            processor.recordCall(
+                input: memoryBytes,
+                traceIndex: traceIndex,
+                memoryOffset: UInt64(offsetInt),
+                size: sizeInt
+            )
+            keccakBatchIndices[traceIndex] = traceIndex
+        }
+
         // Compute Keccak-256 hash using zkMetal's CPU implementation
+        // (Immediate computation ensures correct EVM execution)
         let hashBytes = zkMetal.keccak256(memoryBytes)
 
         // Convert 32-byte hash to M31Word (big-endian byte order)
@@ -1542,4 +1831,30 @@ public struct EVMExecutionResult: Sendable {
     public let memoryTrace: MemoryTrace
     public let storageTrace: StorageTrace
     public let callTrace: [CallEntry]
+
+    /// Whether this execution succeeded (not reverted)
+    public var success: Bool {
+        !trace.reverted
+    }
+
+    /// Initialize with all traces
+    public init(
+        trace: EVMExecutionTrace,
+        memoryTrace: MemoryTrace,
+        storageTrace: StorageTrace,
+        callTrace: [CallEntry]
+    ) {
+        self.trace = trace
+        self.memoryTrace = memoryTrace
+        self.storageTrace = storageTrace
+        self.callTrace = callTrace
+    }
+
+    /// Initialize with just a trace (convenience for witness-based proving)
+    public init(trace: EVMExecutionTrace) {
+        self.trace = trace
+        self.memoryTrace = MemoryTrace(accesses: [])
+        self.storageTrace = StorageTrace(accesses: [])
+        self.callTrace = []
+    }
 }

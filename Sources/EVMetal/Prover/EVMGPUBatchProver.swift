@@ -31,26 +31,42 @@ public final class EVMGPUBatchProver {
         public let numQueries: Int
         /// Commitment strategy to use for trace columns.
         public let commitmentStrategy: CommitmentStrategy
+        /// Optional proof compression configuration.
+        public let compressionConfig: ProofCompressionConfig?
 
-        public static let standard = Config(logBlowup: 4, numQueries: 30, commitmentStrategy: .merkle)
-        public static let fast = Config(logBlowup: 2, numQueries: 20, commitmentStrategy: .merkle)
-        public static let highSecurity = Config(logBlowup: 4, numQueries: 40, commitmentStrategy: .merkle)
+        public static let standard = Config(logBlowup: 4, numQueries: 30, commitmentStrategy: .merkle, compressionConfig: nil)
+        public static let fast = Config(logBlowup: 2, numQueries: 20, commitmentStrategy: .merkle, compressionConfig: nil)
+        public static let highSecurity = Config(logBlowup: 4, numQueries: 40, commitmentStrategy: .merkle, compressionConfig: nil)
 
         /// Configuration with Brakedown commitment strategy.
-        public static let brakedown = Config(logBlowup: 4, numQueries: 30, commitmentStrategy: .brakedown)
+        public static let brakedown = Config(logBlowup: 4, numQueries: 30, commitmentStrategy: .brakedown, compressionConfig: nil)
         /// Fast configuration with Brakedown commitment.
-        public static let brakedownFast = Config(logBlowup: 2, numQueries: 16, commitmentStrategy: .brakedown)
+        public static let brakedownFast = Config(logBlowup: 2, numQueries: 16, commitmentStrategy: .brakedown, compressionConfig: nil)
 
         /// Configuration with interleaved 8-tree Brakedown commitment.
         /// Combines trustless Brakedown with better GPU utilization from 8-tree structure.
-        public static let brakedownInterleaved = Config(logBlowup: 4, numQueries: 30, commitmentStrategy: .brakedownInterleaved)
+        public static let brakedownInterleaved = Config(logBlowup: 4, numQueries: 30, commitmentStrategy: .brakedownInterleaved, compressionConfig: nil)
         /// Fast configuration with interleaved 8-tree Brakedown.
-        public static let brakedownInterleavedFast = Config(logBlowup: 2, numQueries: 16, commitmentStrategy: .brakedownInterleaved)
+        public static let brakedownInterleavedFast = Config(logBlowup: 2, numQueries: 16, commitmentStrategy: .brakedownInterleaved, compressionConfig: nil)
 
-        public init(logBlowup: Int = 4, numQueries: Int = 30, commitmentStrategy: CommitmentStrategy = .merkle) {
+        /// Create a GPU batch prover config with compression settings.
+        /// - Parameters:
+        ///   - compressionConfig: Proof compression configuration (e.g., .highCompression, .standard)
+        ///   - commitmentStrategy: Commitment strategy to use.
+        public static func compressed(compressionConfig: ProofCompressionConfig, commitmentStrategy: CommitmentStrategy = .merkle) -> Config {
+            Config(
+                logBlowup: compressionConfig.logBlowup,
+                numQueries: compressionConfig.numQueries,
+                commitmentStrategy: commitmentStrategy,
+                compressionConfig: compressionConfig
+            )
+        }
+
+        public init(logBlowup: Int = 4, numQueries: Int = 30, commitmentStrategy: CommitmentStrategy = .merkle, compressionConfig: ProofCompressionConfig? = nil) {
             self.logBlowup = logBlowup
             self.numQueries = numQueries
             self.commitmentStrategy = commitmentStrategy
+            self.compressionConfig = compressionConfig
         }
     }
 
@@ -99,6 +115,7 @@ public final class EVMGPUBatchProver {
     private var brakedownEngine: EVMetalBrakedownEngine?
     private var ldeOptimizer: EVMLDEOptimizer?
     private var gpuMerkleEngine: EVMGPUMerkleEngine?
+    private var leafHashEngine: EVMetalLeafHashEngine?
 
     // GPU proof generation state
     private var gpuTreeBuffer: MTLBuffer?
@@ -125,6 +142,11 @@ public final class EVMGPUBatchProver {
 
         // Initialize GPU Merkle engine for GPU proof generation
         self.gpuMerkleEngine = try? EVMGPUMerkleEngine()
+
+        // Initialize leaf hash engine for batch GPU leaf hashing optimization
+        self.leafHashEngine = try? EVMetalLeafHashEngine()
+        // Set to precomputed level to enable H4 position hash optimization
+        self.leafHashEngine?.optimizationLevel = .precomputed
     }
 
     // MARK: - Prove Single Transaction
@@ -150,9 +172,13 @@ public final class EVMGPUBatchProver {
         let trace = air.generateTrace()
         let traceLen = trace[0].count
         let numColumns = trace.count
+
+        // OPTIMIZATION: Use compression config to reduce tree size
+        // logBlowup from compression config reduces leaves by 4x when set to 2 instead of 4
+        let effectiveLogBlowup = config.compressionConfig?.logBlowup ?? config.logBlowup
         // Ensure logTrace is at least 1 to avoid invalid range in Circle NTT (1..<0 is invalid)
         let logTrace = max(1, air.logTraceLength)
-        let logEval = logTrace + config.logBlowup
+        let logEval = logTrace + effectiveLogBlowup
         let evalLen = 1 << logEval
 
         // Step 3: GPU LDE via Circle NTT
@@ -170,14 +196,38 @@ public final class EVMGPUBatchProver {
             // Traditional Poseidon2-M31 Merkle tree commitment
             // OPTIMIZATION: Use GPU Merkle engine with tree structure preservation
             // for GPU-side proof generation (eliminates CPU tree rebuilding bottleneck)
-            if let merkleEng = gpuMerkleEngine {
-                // Convert traceLDEs to treesLeaves format (8 M31 per leaf)
+            // OPTIMIZATION: Batch GPU leaf hashing with H4 precomputation for all columns
+            if let merkleEng = gpuMerkleEngine, let leafEng = leafHashEngine {
+                // Flatten all columns: [col0_all, col1_all, col2_all, ...]
+                var allValues: [M31] = []
+                allValues.reserveCapacity(numColumns * evalLen)
+                for col in traceLDEs {
+                    allValues.append(contentsOf: col.prefix(evalLen))
+                }
+
+                // Use auto-optimized batch hashing (select best kernel based on config)
+                // This will use H2/H3 kernels by default for sharedMem optimization level
+                let treesLeaves = try leafEng.hashLeavesAutoOptimized(
+                    allValues: allValues,
+                    numColumns: numColumns,
+                    countPerColumn: evalLen
+                )
+
+                // Build trees with GPU (no leaf hashing needed)
+                let (roots, treeBuf, numLeaves) = try merkleEng.buildTreesWithGPUProof(
+                    treesLeaves: treesLeaves,
+                    keepTreeBuffer: true
+                )
+                traceCommitments = roots
+                gpuTreeBuffer = treeBuf
+                gpuTreeNumLeaves = numLeaves
+            } else if let merkleEng = gpuMerkleEngine {
+                // Fallback without GPU leaf hashing: GPU tree building
                 var treesLeaves: [[M31]] = []
                 for col in traceLDEs {
                     treesLeaves.append(Array(col.prefix(evalLen * 8)))
                 }
 
-                // Build trees with GPU proof support (keeps tree buffer)
                 let (roots, treeBuf, numLeaves) = try merkleEng.buildTreesWithGPUProof(
                     treesLeaves: treesLeaves,
                     keepTreeBuffer: true
@@ -197,7 +247,7 @@ public final class EVMGPUBatchProver {
         case .brakedown:
             // Brakedown polynomial commitment
             guard let brakedownEng = brakedownEngine else {
-                throw GPUProverError.noGPU
+                throw BrakedownError.noGPU
             }
             let brakedownResult = try brakedownEng.commit(traceLDEs: traceLDEs, evalLen: evalLen)
 
@@ -217,7 +267,7 @@ public final class EVMGPUBatchProver {
         case .brakedownInterleaved:
             // Brakedown with interleaved 8-tree structure
             guard let brakedownEng = brakedownEngine else {
-                throw GPUProverError.noGPU
+                throw BrakedownError.noGPU
             }
             let brakedownResult = try brakedownEng.commitInterleaved8Trees(traceLDEs: traceLDEs, evalLen: evalLen)
 
@@ -250,10 +300,22 @@ public final class EVMGPUBatchProver {
         let step = evalLen / traceLen
         var compositionEvals = [M31](repeating: .zero, count: evalLen)
 
+        // Get column subset for composition polynomial
+        // Only include proving columns (not all 180) to reduce FRI polynomial size
+        let compositionColumnIndices: [Int]
+        if let blockAir = air as? BlockAIR, blockAir.useColumnSubset {
+            compositionColumnIndices = blockAir.provingColumnIndices.isEmpty
+                ? Array(0..<min(blockAir.provingColumnCount, air.numColumns))
+                : blockAir.provingColumnIndices
+            print("  [GPU-Batch] Column subset composition: \(compositionColumnIndices.count) columns in FRI (from \(air.numColumns))")
+        } else {
+            compositionColumnIndices = Array(0..<air.numColumns)
+        }
+
         for i in 0..<evalLen {
             let nextI = (i + step) % evalLen
-            let current = (0..<numColumns).map { traceLDEs[$0][i] }
-            let next = (0..<numColumns).map { traceLDEs[$0][nextI] }
+            let current = compositionColumnIndices.map { traceLDEs[$0][i] }
+            let next = compositionColumnIndices.map { traceLDEs[$0][nextI] }
 
             let cVals = air.evaluateConstraints(current: current, next: next)
 

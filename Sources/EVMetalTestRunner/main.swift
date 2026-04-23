@@ -15,10 +15,12 @@ import EVMetal
 ///   ./EVMetalRunner full-compare - Run full block comparison
 ///   ./EVMetalRunner real-block [num] - Fetch and test real Ethereum block
 ///   ./EVMetalRunner real-block-unified [num] - Fetch and test real block with unified proving
+///   ./EVMetalRunner real-block-unified [num] [compression] - compression: standard (32 cols), fast (16 cols)
 ///   ./EVMetalRunner synthetic-block - Run synthetic block benchmark
 ///   ./EVMetalRunner test <name> - Run specific test by name
 ///   ./EVMetalRunner compression - Run proof compression benchmarks
 ///   ./EVMetalRunner compression-compare - Compare baseline vs compressed
+///   ./EVMetalRunner compression-tests - Run proof compression tests
 
 let args = ProcessInfo.processInfo.arguments
 let mode = args.count > 1 ? args[1] : "tests"
@@ -26,9 +28,6 @@ let testFilter = args.count > 2 ? args[2] : nil
 
 switch mode {
 case "benchmarks":
-    Benchmarks.runAll()
-
-case "profile":
     Benchmarks.runAll()
 
 case "quick":
@@ -81,10 +80,45 @@ case "real-block":
 case "real-block-unified":
     // Fetch and process a real Ethereum block with unified proving
     let blockNumber = args.count > 2 ? args[2] : nil
+    let compressionArg = args.count > 3 ? args[3] : "standard"
+
+    let compressionConfig: BatchProverConfig
+    switch compressionArg {
+    case "fast", "ultra":
+        print("Using ultra-fast compression (16 columns)")
+        compressionConfig = .ultraFast
+    case "none", "full":
+        print("Using full columns (180 columns)")
+        compressionConfig = .unifiedBlock  // Will be modified below
+    default:
+        print("Using standard compression (32 columns)")
+        compressionConfig = .unifiedBlock
+    }
+
+    // Update compression config for "none" case
+    let finalConfig: BatchProverConfig
+    if compressionArg == "none" || compressionArg == "full" {
+        finalConfig = BatchProverConfig(
+            batchSize: 150,
+            useGPU: true,
+            logTraceLength: 8,
+            numQueries: 4,
+            logBlowup: 2,
+            useUnifiedProof: true,
+            provingColumnCount: 180,
+            criticalColumnIndices: []
+        )
+    } else {
+        finalConfig = compressionConfig
+    }
+
     let group = DispatchGroup()
     group.enter()
     Task {
-        await RealEthereumBlockFetcher.benchmarkRealBlockUnified(blockNumber: blockNumber)
+        await RealEthereumBlockFetcher.benchmarkRealBlockUnified(
+            blockNumber: blockNumber,
+            config: finalConfig
+        )
         group.leave()
     }
     group.wait()

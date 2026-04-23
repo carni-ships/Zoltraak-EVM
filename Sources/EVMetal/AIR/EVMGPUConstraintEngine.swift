@@ -73,8 +73,11 @@ public final class EVMGPUConstraintEngine: Sendable {
     /// Number of constraints per row (matching EVMAIR)
     public static let numConstraints = 20
 
-    /// Maximum GPU memory budget for constraint engine (100MB target)
-    public static let maxMemoryBudgetBytes = 100 * 1024 * 1024
+    /// Maximum GPU memory budget for constraint engine (reduced for safety)
+    public static let maxMemoryBudgetBytes = 80 * 1024 * 1024  // 80MB
+
+    /// Maximum trace length for GPU (prevent OOM)
+    public static let maxTraceLengthGPU = 131072  // 128K max
 
     /// Number of constraints per thread group processing
     private static let constraintsPerThreadGroup = 256
@@ -200,13 +203,16 @@ public final class EVMGPUConstraintEngine: Sendable {
     ///   - trace: The execution trace as columns of M31 elements [numColumns x traceLength]
     ///   - challenges: Random challenges for composition polynomial [numConstraints]
     ///   - mode: Evaluation mode (simple, batch, or vectorized)
+    ///   - traceLengthOverride: Optional override for trace length (for LDE traces)
     /// - Returns: GPU-evaluated constraint results
     public func evaluateConstraints(
         trace: [[M31]],
         challenges: [M31] = [],
-        mode: EvaluationMode = .batch
+        mode: EvaluationMode = .batch,
+        traceLengthOverride: Int? = nil
     ) throws -> EvaluationResult {
-        let traceLength = 1 << logTraceLength
+        let baseTraceLength = 1 << logTraceLength
+        let traceLength = traceLengthOverride ?? baseTraceLength
         let numColumns = Self.numColumns
         let numConstraints = Self.numConstraints
 
@@ -343,12 +349,15 @@ public final class EVMGPUConstraintEngine: Sendable {
     /// - Parameters:
     ///   - constraints: Pre-evaluated constraint values
     ///   - challenges: Random challenges for weighted sum
+    ///   - traceLengthOverride: Optional override for trace length (for LDE traces)
     /// - Returns: Composition polynomial values
     public func evaluateCompositionPolynomial(
         constraints: [M31],
-        challenges: [M31]
+        challenges: [M31],
+        traceLengthOverride: Int? = nil
     ) throws -> [M31] {
-        let traceLength = 1 << logTraceLength
+        let baseTraceLength = 1 << logTraceLength
+        let traceLength = traceLengthOverride ?? baseTraceLength
         let numConstraints = Self.numConstraints
         let numRows = traceLength - 1
 
@@ -523,6 +532,10 @@ public final class EVMGPUConstraintEngine: Sendable {
 
     /// Check if GPU can handle given trace dimensions
     public func canHandle(traceLength: Int, numColumns: Int = 180) -> Bool {
+        // Extra safety: don't use GPU for very large traces
+        if traceLength > Self.maxTraceLengthGPU {
+            return false
+        }
         let estimatedMemory = Self.estimateMemoryUsage(traceLength: traceLength, numColumns: numColumns)
         return estimatedMemory <= Self.maxMemoryBudgetBytes
     }

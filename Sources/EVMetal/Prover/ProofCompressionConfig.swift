@@ -187,6 +187,14 @@ public struct ProofCompressionConfig {
         provingColumnCount: 16
     )
 
+    /// Ultra compression: 2x blowup with logBlowup=1 for maximum speed.
+    public static let ultraCompression = ProofCompressionConfig(
+        logTraceLength: 6,
+        logBlowup: 1,  // Minimum blowup for fastest LDE/FRI
+        numQueries: 20,
+        provingColumnCount: 32
+    )
+
     /// High compression: good speedup with reasonable security.
     public static let highCompression = ProofCompressionConfig(
         logTraceLength: 6,

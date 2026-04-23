@@ -17,6 +17,32 @@ import Foundation
 import Metal
 import zkMetal
 
+// MARK: - Brakedown Commitment Errors
+
+/// Errors that can occur during Brakedown commitment operations.
+public enum BrakedownError: Error {
+    case noGPU
+    case noCommandQueue
+    case missingKernel
+    case gpuError(String)
+    case initializationFailed(String)
+
+    public var description: String {
+        switch self {
+        case .noGPU:
+            return "No GPU available"
+        case .noCommandQueue:
+            return "Failed to create Metal command queue"
+        case .missingKernel:
+            return "Metal kernel not found"
+        case .gpuError(let msg):
+            return "GPU error: \(msg)"
+        case .initializationFailed(let msg):
+            return "Initialization failed: \(msg)"
+        }
+    }
+}
+
 // MARK: - EVMetal Brakedown Configuration
 
 /// Configuration for EVMetal Brakedown commitment.
@@ -170,11 +196,11 @@ public class EVMetalBrakedownEngine {
 
         self.proverEngine = try GPUBrakedownProverEngine(config: proverConfig)
         guard let dev = MTLCreateSystemDefaultDevice() else {
-            throw GPUProverError.noGPU
+            throw BrakedownError.noGPU
         }
         self.device = dev
         guard let queue = device.makeCommandQueue() else {
-            throw GPUProverError.noCommandQueue
+            throw BrakedownError.noCommandQueue
         }
         self.commandQueue = queue
     }

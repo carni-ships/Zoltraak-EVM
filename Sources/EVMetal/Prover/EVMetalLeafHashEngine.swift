@@ -34,6 +34,10 @@ public final class EVMetalLeafHashEngine {
     // Shared memory pool for position caching (H3)
     private var sharedPositionCachePool: [MTLBuffer] = []
 
+    // H4: Precomputed position hash states (P2M31_T=16 values per position)
+    private var precomputedPositionStates: [MTLBuffer] = []
+    private static let poseidonT = 16  // P2M31_T from shader
+
     /// Use SIMD group cooperative kernel (faster but requires threadgroup sync)
     /// Note: Currently disabled - SIMD kernel had Metal compilation issues
     public var useSIMDCooperative: Bool = false { didSet { _ = useSIMDCooperative } }
@@ -71,6 +75,7 @@ public final class EVMetalLeafHashEngine {
 
     private var inputBufferPool = BufferPool(maxSize: 5)
     private var outputBufferPool = BufferPool(maxSize: 5)
+    private var positionStatesBufferPool = BufferPool(maxSize: 3)  // Pool for H4 precomputed states
 
     public static let nodeSize = 8  // M31 elements per digest
 
@@ -896,6 +901,174 @@ public final class EVMetalLeafHashEngine {
         return results
     }
 
+    /// H4: Pre-compute Poseidon2 hash states for all positions (0..countPerColumn-1)
+    /// This runs once on CPU/GPU before leaf hashing to eliminate position hashing from critical path.
+    ///
+    /// Key insight: Instead of hashing (position, value) for each leaf, pre-hash the position
+    /// once to get state S_pos, then for each leaf just do S_pos + value and permute.
+    ///
+    /// - Parameters:
+    ///   - countPerColumn: Number of unique positions to pre-compute (e.g., 1024 for 1024 leaves)
+    /// - Throws: GPUProverError if precomputation fails
+    public func precomputePositionHashes(countPerColumn: Int) throws {
+        guard let kernel = precomputePositionsFunction else {
+            throw GPUProverError.missingKernel
+        }
+
+        let stride = MemoryLayout<UInt32>.stride
+        let statesBufLength = countPerColumn * Self.poseidonT * stride
+
+        // Create positions array: [0, 1, 2, ..., countPerColumn-1]
+        var flatPositions = [UInt32](repeating: 0, count: countPerColumn)
+        for i in 0..<countPerColumn {
+            flatPositions[i] = UInt32(i)
+        }
+
+        // Allocate buffers using pool
+        guard let positionsBuf = positionStatesBufferPool.obtain(device: device, length: countPerColumn * stride, options: .storageModeShared),
+              let statesBuf = positionStatesBufferPool.obtain(device: device, length: statesBufLength, options: .storageModeShared) else {
+            throw GPUProverError.gpuError("Failed to allocate buffers for position precomputation")
+        }
+
+        // Copy positions to buffer
+        memcpy(positionsBuf.contents(), flatPositions, countPerColumn * stride)
+
+        // GPU dispatch for position precomputation
+        guard let cmdBuf = commandQueue.makeCommandBuffer() else {
+            throw GPUProverError.noCommandBuffer
+        }
+        let enc = cmdBuf.makeComputeCommandEncoder()!
+
+        enc.setComputePipelineState(kernel)
+        enc.setBuffer(positionsBuf, offset: 0, index: 0)
+        enc.setBuffer(statesBuf, offset: 0, index: 1)
+        enc.setBuffer(rcBuffer, offset: 0, index: 2)
+        var cnt = UInt32(countPerColumn)
+        enc.setBytes(&cnt, length: 4, index: 3)
+
+        let threadsPerTG = min(kernel.maxTotalThreadsPerThreadgroup, 256)
+        let numThreadgroups = (countPerColumn + threadsPerTG - 1) / threadsPerTG
+        enc.dispatchThreadgroups(MTLSize(width: numThreadgroups, height: 1, depth: 1),
+                               threadsPerThreadgroup: MTLSize(width: threadsPerTG, height: 1, depth: 1))
+        enc.endEncoding()
+
+        cmdBuf.commit()
+        cmdBuf.waitUntilCompleted()
+
+        if let error = cmdBuf.error {
+            positionStatesBufferPool.returnBuffer(positionsBuf)
+            positionStatesBufferPool.returnBuffer(statesBuf)
+            throw GPUProverError.gpuError(error.localizedDescription)
+        }
+
+        // Return buffers to pool for later use
+        positionStatesBufferPool.returnBuffer(positionsBuf)
+        positionStatesBufferPool.returnBuffer(statesBuf)
+    }
+
+    /// H4: Hash leaves using pre-computed position hash states
+    /// Must call precomputePositionHashes(countPerColumn:) first.
+    ///
+    /// - Parameters:
+    ///   - allValues: All column values in transposed layout
+    ///   - numColumns: Number of columns
+    ///   - countPerColumn: Number of leaves per column
+    /// - Returns: Array of digests per column
+    public func hashLeavesWithPrecomputedPositions(
+        allValues: [M31],
+        numColumns: Int,
+        countPerColumn: Int,
+        precomputedStates: MTLBuffer  // Pre-computed position hash states
+    ) throws -> [[M31]] {
+        guard let kernel = hashLeavesPrecomputedFunction else {
+            throw GPUProverError.missingKernel
+        }
+
+        let totalCount = numColumns * countPerColumn
+        let stride = MemoryLayout<UInt32>.stride
+        let digestStride = 8 * stride
+
+        // Allocate buffers
+        let valuesBufLength = totalCount * stride
+        let digestsBufLength = totalCount * digestStride
+
+        guard let valuesBuf = inputBufferPool.obtain(device: device, length: valuesBufLength, options: .storageModeShared) else {
+            throw GPUProverError.gpuError("Failed to allocate values buffer")
+        }
+
+        guard let digestsBuf = device.makeBuffer(length: digestsBufLength, options: .storageModeShared) else {
+            inputBufferPool.returnBuffer(valuesBuf)
+            throw GPUProverError.gpuError("Failed to allocate digest buffer")
+        }
+
+        // Copy values in transposed layout (contiguous by column)
+        let valuesPtr = valuesBuf.contents().bindMemory(to: UInt32.self, capacity: totalCount)
+        for col in 0..<numColumns {
+            let srcBase = col * countPerColumn
+            let dstBase = col * countPerColumn
+            for i in 0..<countPerColumn {
+                valuesPtr[dstBase + i] = allValues[srcBase + i].v
+            }
+        }
+
+        // GPU dispatch with precomputed positions kernel
+        guard let cmdBuf = commandQueue.makeCommandBuffer() else {
+            inputBufferPool.returnBuffer(valuesBuf)
+            throw GPUProverError.noCommandBuffer
+        }
+        let enc = cmdBuf.makeComputeCommandEncoder()!
+
+        enc.setComputePipelineState(kernel)
+        enc.setBuffer(valuesBuf, offset: 0, index: 0)
+        enc.setBuffer(precomputedStates, offset: 0, index: 1)
+        enc.setBuffer(digestsBuf, offset: 0, index: 2)
+        enc.setBuffer(rcBuffer, offset: 0, index: 3)
+        var cnt = UInt32(totalCount)
+        enc.setBytes(&cnt, length: 4, index: 4)
+
+        let threadsPerTG = min(kernel.maxTotalThreadsPerThreadgroup, 256)
+        let numThreadgroups = (totalCount + threadsPerTG - 1) / threadsPerTG
+        enc.dispatchThreadgroups(MTLSize(width: numThreadgroups, height: 1, depth: 1),
+                               threadsPerThreadgroup: MTLSize(width: threadsPerTG, height: 1, depth: 1))
+        enc.endEncoding()
+
+        cmdBuf.commit()
+        cmdBuf.waitUntilCompleted()
+
+        if let error = cmdBuf.error {
+            inputBufferPool.returnBuffer(valuesBuf)
+            throw GPUProverError.gpuError(error.localizedDescription)
+        }
+
+        // Read results
+        let ptr = digestsBuf.contents().bindMemory(to: UInt32.self, capacity: totalCount * 8)
+        var results: [[M31]] = []
+        results.reserveCapacity(numColumns)
+
+        for col in 0..<numColumns {
+            var columnDigests: [M31] = []
+            columnDigests.reserveCapacity(countPerColumn * 8)
+            let colBase = col * countPerColumn
+            for i in 0..<countPerColumn {
+                let baseIdx = (colBase + i) * 8
+                for j in 0..<8 {
+                    columnDigests.append(M31(v: ptr[baseIdx + j]))
+                }
+            }
+            results.append(columnDigests)
+        }
+
+        // Return input buffers to pools
+        inputBufferPool.returnBuffer(valuesBuf)
+        // Note: digestsBuf is not pooled due to variable size requirements
+
+        return results
+    }
+
+    // H4: Cached precomputed position states (reused across multiple calls)
+    private var cachedPositionStates: MTLBuffer?
+    private var cachedCountPerColumn: Int = 0
+
     /// Hash all leaves using the best available optimization level
     /// Automatically selects the optimal kernel based on availability
     ///
@@ -915,13 +1088,93 @@ public final class EVMetalLeafHashEngine {
         case .coalesced, .sharedMem:
             return try hashLeavesOptimizedH2H3(allValues: allValues, numColumns: numColumns, countPerColumn: countPerColumn)
         case .precomputed:
-            // H4 requires precomputation - fallback to H2H3 for simplicity
-            return try hashLeavesOptimizedH2H3(allValues: allValues, numColumns: numColumns, countPerColumn: countPerColumn)
+            // H4: Use pre-computed position hashes
+            return try hashLeavesWithPrecomputedPositionsH4(
+                allValues: allValues,
+                numColumns: numColumns,
+                countPerColumn: countPerColumn
+            )
         case .halfPrecision:
             return try hashLeavesOptimizedH2H3H5(allValues: allValues, numColumns: numColumns, countPerColumn: countPerColumn)
         case .combined:
             return try hashLeavesFullyOptimized(allValues: allValues, numColumns: numColumns, countPerColumn: countPerColumn)
         }
+    }
+
+    /// H4: Hash leaves with pre-computed position hash states
+    /// Uses cached position states if countPerColumn matches, otherwise recomputes
+    private func hashLeavesWithPrecomputedPositionsH4(
+        allValues: [M31],
+        numColumns: Int,
+        countPerColumn: Int
+    ) throws -> [[M31]] {
+        // Check if we need to recompute position hashes
+        if cachedPositionStates == nil || cachedCountPerColumn != countPerColumn {
+            // Recompute position hashes
+            try precomputePositionHashes(countPerColumn: countPerColumn)
+
+            // Allocate and fill the states buffer
+            let stride = MemoryLayout<UInt32>.stride
+            let statesBufLength = countPerColumn * Self.poseidonT * stride
+
+            guard let statesBuf = device.makeBuffer(length: statesBufLength, options: .storageModeShared) else {
+                throw GPUProverError.gpuError("Failed to allocate states buffer")
+            }
+
+            // Create positions array and run precomputation kernel
+            var flatPositions = [UInt32](repeating: 0, count: countPerColumn)
+            for i in 0..<countPerColumn {
+                flatPositions[i] = UInt32(i)
+            }
+
+            guard let kernel = precomputePositionsFunction else {
+                throw GPUProverError.missingKernel
+            }
+
+            guard let positionsBuf = device.makeBuffer(bytes: flatPositions, length: countPerColumn * stride, options: .storageModeShared) else {
+                throw GPUProverError.gpuError("Failed to allocate positions buffer")
+            }
+
+            guard let cmdBuf = commandQueue.makeCommandBuffer() else {
+                throw GPUProverError.noCommandBuffer
+            }
+            let enc = cmdBuf.makeComputeCommandEncoder()!
+
+            enc.setComputePipelineState(kernel)
+            enc.setBuffer(positionsBuf, offset: 0, index: 0)
+            enc.setBuffer(statesBuf, offset: 0, index: 1)
+            enc.setBuffer(rcBuffer, offset: 0, index: 2)
+            var cnt = UInt32(countPerColumn)
+            enc.setBytes(&cnt, length: 4, index: 3)
+
+            let threadsPerTG = min(kernel.maxTotalThreadsPerThreadgroup, 256)
+            let numThreadgroups = (countPerColumn + threadsPerTG - 1) / threadsPerTG
+            enc.dispatchThreadgroups(MTLSize(width: numThreadgroups, height: 1, depth: 1),
+                                   threadsPerThreadgroup: MTLSize(width: threadsPerTG, height: 1, depth: 1))
+            enc.endEncoding()
+
+            cmdBuf.commit()
+            cmdBuf.waitUntilCompleted()
+
+            if let error = cmdBuf.error {
+                throw GPUProverError.gpuError(error.localizedDescription)
+            }
+
+            cachedPositionStates = statesBuf
+            cachedCountPerColumn = countPerColumn
+        }
+
+        // Use cached precomputed states
+        guard let states = cachedPositionStates else {
+            throw GPUProverError.gpuError("No cached position states available")
+        }
+
+        return try hashLeavesWithPrecomputedPositions(
+            allValues: allValues,
+            numColumns: numColumns,
+            countPerColumn: countPerColumn,
+            precomputedStates: states
+        )
     }
 
     /// Get available optimization features

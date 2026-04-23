@@ -80,13 +80,18 @@ public struct EVMExecutionTrace: Sendable {
     public let returnData: [UInt8]
     public let reverted: Bool
 
+    /// Precomputed Keccak-256 hashes from batch GPU processing
+    /// Maps trace row index to the computed hash
+    public let keccakHashes: [Int: [UInt8]]
+
     public init(
         rows: [EVMTraceRow],
         initialState: EVMStateSnapshot,
         finalState: EVMStateSnapshot,
         gasUsed: UInt64,
         returnData: [UInt8],
-        reverted: Bool
+        reverted: Bool,
+        keccakHashes: [Int: [UInt8]] = [:]
     ) {
         self.rows = rows
         self.initialState = initialState
@@ -94,6 +99,7 @@ public struct EVMExecutionTrace: Sendable {
         self.gasUsed = gasUsed
         self.returnData = returnData
         self.reverted = reverted
+        self.keccakHashes = keccakHashes
     }
 
     /// Number of trace rows

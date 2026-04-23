@@ -66,8 +66,48 @@ import zkMetal
     /// GPU SIMD-optimized proof generation kernel
     private let simdProofGenFunction: MTLComputePipelineState
 
+    /// GPU leaf hashing kernel with position (for GPU-only pipeline)
+    private let leafHashFunction: MTLComputePipelineState
+
+    /// GPU hash pairs kernel
+    private let hashPairsKernel: MTLComputePipelineState
+
     /// Round constants buffer for the custom kernel
     private let rcBuffer: MTLBuffer
+
+    // MARK: - GPU Buffer Pool for Reuse
+
+    /// Reusable buffers for high-frequency operations (reduce allocation overhead)
+    private var bufferPool: [BufferEntry] = []
+
+    /// Buffer entry in the pool
+    private struct BufferEntry {
+        let buffer: MTLBuffer
+        let size: Int
+        var lastUseTime: CFAbsoluteTime = 0
+    }
+
+    /// Get or create a reusable buffer of the specified size
+    /// This reduces GPU memory allocation overhead
+    private func getOrCreateBuffer(size: Int) -> MTLBuffer? {
+        let now = CFAbsoluteTimeGetCurrent()
+
+        // Try to find an existing buffer of sufficient size
+        for i in 0..<bufferPool.count {
+            if bufferPool[i].size >= size {
+                bufferPool[i].lastUseTime = now
+                return bufferPool[i].buffer
+            }
+        }
+
+        // Create new buffer
+        guard let buffer = device.makeBuffer(length: size, options: .storageModeShared) else {
+            return nil
+        }
+
+        bufferPool.append(BufferEntry(buffer: buffer, size: size, lastUseTime: now))
+        return buffer
+    }
 
     public init() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
@@ -129,6 +169,20 @@ import zkMetal
         self.batchProofGenFunction = try Self.compileProofKernel(device: device, library: upperBatchLibrary, name: "poseidon2_m31_merkle_proof_batch")
         self.simdProofGenFunction = try Self.compileProofKernel(device: device, library: upperBatchLibrary, name: "poseidon2_m31_merkle_proof_batch_simd")
 
+        // GPU leaf hashing kernel (from EVMetal's shader)
+        let leafHashLibrary = try Self.compileLeafHashShaders(device: device)
+        if let lhFn = leafHashLibrary.makeFunction(name: "poseidon2_m31_hash_leaves_with_position") {
+            self.leafHashFunction = try device.makeComputePipelineState(function: lhFn)
+        } else {
+            throw GPUProverError.missingKernel
+        }
+
+        if let hpFn = leafHashLibrary.makeFunction(name: "poseidon2_m31_hash_pairs") {
+            self.hashPairsKernel = try device.makeComputePipelineState(function: hpFn)
+        } else {
+            throw GPUProverError.missingKernel
+        }
+
         // Create round constants buffer for custom kernel
         let rc = POSEIDON2_M31_ROUND_CONSTANTS
         var flatRC = [UInt32]()
@@ -151,6 +205,20 @@ import zkMetal
     private static func compileUpperBatchShaders(device: MTLDevice) throws -> MTLLibrary {
         let shaderDir = Self.findShaderDir()
         let shaderPath = shaderDir + "/poseidon2_m31_merkle_tree.metal"
+        guard FileManager.default.fileExists(atPath: shaderPath) else {
+            throw GPUProverError.missingKernel
+        }
+        let source = try String(contentsOfFile: shaderPath, encoding: .utf8)
+        let options = MTLCompileOptions()
+        options.fastMathEnabled = true
+        options.languageVersion = .version2_0
+        return try device.makeLibrary(source: source, options: options)
+    }
+
+    /// Compile leaf hash shaders from EVMetal's shader directory.
+    private static func compileLeafHashShaders(device: MTLDevice) throws -> MTLLibrary {
+        let shaderDir = Self.findShaderDir()
+        let shaderPath = shaderDir + "/poseidon2_m31_leaf_hash.metal"
         guard FileManager.default.fileExists(atPath: shaderPath) else {
             throw GPUProverError.missingKernel
         }
@@ -463,6 +531,271 @@ import zkMetal
                 nodeSize: nodeSize
             )
         }
+    }
+
+    /// Build trees with GPU leaf hashing integrated (no CPU readback).
+    ///
+    /// Two-stage pipeline:
+    /// 1. GPU leaf hashing: Hash each M31 value with position → digest (8 M31)
+    /// 2. GPU Merkle tree: Build trees from pre-hashed digests
+    ///
+    /// - Parameters:
+    ///   - traceLDEs: Raw trace LDE columns [[M31]] (unhashed)
+    ///   - numColumns: Number of columns
+    ///   - evalLen: Evaluation length (leaves per column)
+    /// - Returns: Array of M31Digest roots
+    public func buildTreesWithLeafHash(
+        traceLDEs: [[M31]],
+        numColumns: Int,
+        evalLen: Int
+    ) throws -> [zkMetal.M31Digest] {
+        let nodeSize = 8
+        let subtreeMax = Poseidon2M31Engine.merkleSubtreeSize
+
+        guard traceLDEs.count == numColumns else {
+            throw GPUProverError.gpuError("Column count mismatch: \(traceLDEs.count) vs \(numColumns)")
+        }
+
+        let stride = MemoryLayout<UInt32>.stride
+
+        // === Stage 1: GPU Leaf Hashing ===
+        // Input: numColumns * evalLen M31 values (raw trace)
+        // Output: numColumns * evalLen * nodeSize M31 values (digests, 8 M31 per input)
+        // Kernel outputs 8 M31 per thread, so total output = input_count * 8
+
+        // Copy trace data to input buffer (1 M31 per value)
+        let totalInputVals = numColumns * evalLen
+        guard let inputBuf = device.makeBuffer(length: totalInputVals * stride, options: .storageModeShared) else {
+            throw GPUProverError.gpuError("Failed to allocate input buffer (\(totalInputVals * stride) bytes)")
+        }
+
+        let inputPtr = inputBuf.contents().bindMemory(to: UInt32.self, capacity: totalInputVals)
+        var idx = 0
+        for col in traceLDEs {
+            for val in col {
+                inputPtr[idx] = val.v
+                idx += 1
+            }
+        }
+
+        // Create positions buffer: position = leaf_index % evalLen
+        let positionsVals = numColumns * evalLen
+        guard let positionsBuf = device.makeBuffer(length: positionsVals * stride, options: .storageModeShared) else {
+            throw GPUProverError.gpuError("Failed to allocate positions buffer")
+        }
+        let positionsPtr = positionsBuf.contents().bindMemory(to: UInt32.self, capacity: positionsVals)
+        for colIdx in 0..<numColumns {
+            let baseOffset = colIdx * evalLen
+            for leafIdx in 0..<evalLen {
+                positionsPtr[baseOffset + leafIdx] = UInt32(leafIdx)
+            }
+        }
+
+        // Output buffer for hashed digests: 8 M31 per input value
+        // Kernel writes digest[gid * 8 + i] for i = 0..<8
+        let totalDigestVals = numColumns * evalLen * nodeSize
+        guard let hashedBuf = device.makeBuffer(length: totalDigestVals * stride, options: .storageModeShared) else {
+            throw GPUProverError.gpuError("Failed to allocate hashed buffer (\(totalDigestVals * stride) bytes)")
+        }
+
+        // GPU leaf hashing dispatch
+        guard let hashCmdBuf = commandQueue.makeCommandBuffer() else {
+            throw GPUProverError.noCommandBuffer
+        }
+        let hashEnc = hashCmdBuf.makeComputeCommandEncoder()!
+
+        hashEnc.setComputePipelineState(leafHashFunction)
+        hashEnc.setBuffer(inputBuf, offset: 0, index: 0)        // Values
+        hashEnc.setBuffer(positionsBuf, offset: 0, index: 1)     // Positions
+        hashEnc.setBuffer(hashedBuf, offset: 0, index: 2)        // Output (digests)
+        hashEnc.setBuffer(rcBuffer, offset: 0, index: 3)         // Round constants
+
+        var numLeaves = UInt32(numColumns * evalLen)
+        hashEnc.setBytes(&numLeaves, length: 4, index: 4)        // count at index 4
+
+        let totalThreads = numColumns * evalLen
+        hashEnc.dispatchThreadgroups(
+            MTLSize(width: (totalThreads + 31) / 32, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1)
+        )
+
+        hashEnc.endEncoding()
+        hashCmdBuf.commit()
+        try waitAndCheckError(hashCmdBuf, operation: "buildTreesWithLeafHash: leaf hash")
+
+        // === Stage 2: GPU Merkle Tree Building ===
+        // Input: hashed digests (8 M31 per leaf)
+        // Output: roots
+
+        let numLeavesPerTree = evalLen  // Each column has evalLen leaves
+        let numSubtrees = numLeavesPerTree / subtreeMax
+
+        if numLeavesPerTree <= subtreeMax {
+            // Small trees: use fused kernel directly on hashed buffer
+            return try buildTreesFromHashedBuffer(
+                hashedBuf: hashedBuf,
+                numColumns: numColumns,
+                evalLen: evalLen,
+                nodeSize: nodeSize
+            )
+        } else {
+            // Large trees: build subtree roots, then upper levels
+            return try buildTreesLargeFromHashedBuffer(
+                hashedBuf: hashedBuf,
+                numColumns: numColumns,
+                evalLen: evalLen,
+                nodeSize: nodeSize,
+                subtreeMax: subtreeMax
+            )
+        }
+    }
+
+    /// Build trees from pre-hashed buffer (small trees <= subtreeMax).
+    private func buildTreesFromHashedBuffer(
+        hashedBuf: MTLBuffer,
+        numColumns: Int,
+        evalLen: Int,
+        nodeSize: Int
+    ) throws -> [zkMetal.M31Digest] {
+        let stride = MemoryLayout<UInt32>.stride
+
+        // Allocate output buffer for roots
+        let rootVals = numColumns * nodeSize
+        guard let outputBuf = device.makeBuffer(length: rootVals * stride, options: .storageModeShared) else {
+            throw GPUProverError.gpuError("Failed to allocate output buffer")
+        }
+
+        // Use zkMetal's fused Merkle kernel for all trees
+        guard let cmdBuf = commandQueue.makeCommandBuffer() else {
+            throw GPUProverError.noCommandBuffer
+        }
+        let enc = cmdBuf.makeComputeCommandEncoder()!
+
+        gpuEngine.encodeMerkleFused(
+            encoder: enc,
+            leavesBuffer: hashedBuf,
+            leavesOffset: 0,
+            rootsBuffer: outputBuf,
+            rootsOffset: 0,
+            numSubtrees: numColumns,
+            subtreeSize: evalLen
+        )
+
+        enc.endEncoding()
+        cmdBuf.commit()
+        try waitAndCheckError(cmdBuf, operation: "buildTreesFromHashedBuffer: fuse")
+
+        // Read results
+        let outPtr = outputBuf.contents().bindMemory(to: UInt32.self, capacity: rootVals)
+        var roots: [zkMetal.M31Digest] = []
+        roots.reserveCapacity(numColumns)
+
+        for i in 0..<numColumns {
+            var rootValues = [M31]()
+            rootValues.reserveCapacity(nodeSize)
+            for j in 0..<nodeSize {
+                rootValues.append(M31(v: outPtr[i * nodeSize + j]))
+            }
+            roots.append(zkMetal.M31Digest(values: rootValues))
+        }
+
+        return roots
+    }
+
+    /// Build large trees (> subtreeMax) from pre-hashed buffer.
+    private func buildTreesLargeFromHashedBuffer(
+        hashedBuf: MTLBuffer,
+        numColumns: Int,
+        evalLen: Int,
+        nodeSize: Int,
+        subtreeMax: Int
+    ) throws -> [zkMetal.M31Digest] {
+        let stride = MemoryLayout<UInt32>.stride
+        let numSubtrees = evalLen / subtreeMax
+
+        // Allocate roots buffer for subtree roots
+        let rootsPerTree = numSubtrees * nodeSize
+        let rootsSize = numColumns * rootsPerTree * stride
+
+        guard let rootsBuf = device.makeBuffer(length: rootsSize, options: .storageModeShared) else {
+            throw GPUProverError.gpuError("Failed to allocate roots buffer")
+        }
+
+        // Build subtree roots using fused kernel
+        guard let subtreeCmdBuf = commandQueue.makeCommandBuffer() else {
+            throw GPUProverError.noCommandBuffer
+        }
+        let subtreeEnc = subtreeCmdBuf.makeComputeCommandEncoder()!
+
+        gpuEngine.encodeMerkleFused(
+            encoder: subtreeEnc,
+            leavesBuffer: hashedBuf,
+            leavesOffset: 0,
+            rootsBuffer: rootsBuf,
+            rootsOffset: 0,
+            numSubtrees: numColumns * numSubtrees,
+            subtreeSize: subtreeMax
+        )
+
+        // Build upper levels (from subtree roots to final roots)
+        var currentNodes = numSubtrees
+        var srcBuf = rootsBuf
+
+        if currentNodes > 1 {
+            guard let bufA = device.makeBuffer(length: rootsSize, options: .storageModeShared),
+                  let bufB = device.makeBuffer(length: rootsSize, options: .storageModeShared) else {
+                throw GPUProverError.gpuError("Failed to allocate upper level buffers")
+            }
+
+            var dstBuf = bufA
+            let threadsPerThreadgroup = min(256, upperBatchSIMDFunction.maxTotalThreadsPerThreadgroup)
+
+            while currentNodes > 1 {
+                subtreeEnc.memoryBarrier(scope: .buffers)
+                let pairs = currentNodes / 2
+
+                subtreeEnc.setComputePipelineState(optimizedBatchFunction)
+                subtreeEnc.setBuffer(srcBuf, offset: 0, index: 0)
+                subtreeEnc.setBuffer(dstBuf, offset: 0, index: 1)
+                subtreeEnc.setBuffer(rcBuffer, offset: 0, index: 2)
+                var numTreesVal = UInt32(numColumns)
+                subtreeEnc.setBytes(&numTreesVal, length: 4, index: 3)
+                var numNodesVal = UInt32(currentNodes)
+                subtreeEnc.setBytes(&numNodesVal, length: 4, index: 4)
+                var pairsPerTreeVal = UInt32(pairs)
+                subtreeEnc.setBytes(&pairsPerTreeVal, length: 4, index: 5)
+
+                let threadgroupSize = min(threadsPerThreadgroup, (pairs + 3) / 4)
+                subtreeEnc.dispatchThreadgroups(
+                    MTLSize(width: numColumns, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: threadgroupSize, height: 1, depth: 1)
+                )
+
+                currentNodes = pairs
+                swap(&srcBuf, &dstBuf)
+            }
+        }
+
+        subtreeEnc.endEncoding()
+        subtreeCmdBuf.commit()
+        try waitAndCheckError(subtreeCmdBuf, operation: "buildTreesLargeFromHashedBuffer: subtree+upper")
+
+        // Read final roots
+        let rootVals = numColumns * nodeSize
+        let outPtr = srcBuf.contents().bindMemory(to: UInt32.self, capacity: rootVals)
+        var roots: [zkMetal.M31Digest] = []
+        roots.reserveCapacity(numColumns)
+
+        for i in 0..<numColumns {
+            var rootValues = [M31]()
+            rootValues.reserveCapacity(nodeSize)
+            for j in 0..<nodeSize {
+                rootValues.append(M31(v: outPtr[i * nodeSize + j]))
+            }
+            roots.append(zkMetal.M31Digest(values: rootValues))
+        }
+
+        return roots
     }
 
     /// Build all small trees (<= subtreeMax) from GPU buffers in ONE dispatch.

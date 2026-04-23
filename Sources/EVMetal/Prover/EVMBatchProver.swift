@@ -22,13 +22,22 @@ public struct BatchProverConfig {
     /// Use unified block proof (Phase 3) instead of sequential proving
     public let useUnifiedProof: Bool
 
+    /// Number of columns to include in FRI composition polynomial
+    /// 180 = full, 32 = ~5x faster, 16 = ~8x faster
+    public let provingColumnCount: Int
+
+    /// Indices of critical columns for FRI (if provingColumnCount < 180)
+    public let criticalColumnIndices: [Int]
+
     public init(
         batchSize: Int,
         useGPU: Bool,
         logTraceLength: Int,
         numQueries: Int,
         logBlowup: Int,
-        useUnifiedProof: Bool = false
+        useUnifiedProof: Bool = false,
+        provingColumnCount: Int = 180,
+        criticalColumnIndices: [Int] = []
     ) {
         self.batchSize = batchSize
         self.useGPU = useGPU
@@ -36,6 +45,8 @@ public struct BatchProverConfig {
         self.numQueries = numQueries
         self.logBlowup = logBlowup
         self.useUnifiedProof = useUnifiedProof
+        self.provingColumnCount = provingColumnCount
+        self.criticalColumnIndices = criticalColumnIndices
     }
 
     public static let `default` = BatchProverConfig(
@@ -57,17 +68,34 @@ public struct BatchProverConfig {
     )
 
     /// Configuration optimized for unified block proving (Phase 3)
-    /// OPTIMIZED: Reduced trace length and blowup for faster proving
+    /// OPTIMIZED: Reduced trace length, blowup, and FRI columns for faster proving
     /// - logTraceLength: 8 (256 rows per tx for faster FRI)
-    /// - logBlowup: 2 (4x instead of 4/16x) for ~4x faster LDE/FRI
+    /// - logBlowup: 1 (2x blowup - minimum for maximum LDE/FRI speed)
     /// - numQueries: 4 (reduced from 30 for faster query phase)
+    /// - provingColumnCount: 32 (5x faster FRI vs 180 columns)
     public static let unifiedBlock = BatchProverConfig(
         batchSize: 150,
         useGPU: true,
         logTraceLength: 8,
         numQueries: 4,
-        logBlowup: 2,
-        useUnifiedProof: true
+        logBlowup: 1,  // 2x blowup - fastest configuration
+        useUnifiedProof: true,
+        provingColumnCount: 32,
+        criticalColumnIndices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+    )
+
+    /// Ultra-compressed configuration for maximum speed
+    /// - provingColumnCount: 16 (8x faster FRI vs 180 columns)
+    /// - logTraceLength: 6 (64 rows per tx instead of 256)
+    public static let ultraFast = BatchProverConfig(
+        batchSize: 200,
+        useGPU: true,
+        logTraceLength: 6,
+        numQueries: 4,
+        logBlowup: 1,
+        useUnifiedProof: true,
+        provingColumnCount: 16,
+        criticalColumnIndices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     )
 }
 
@@ -236,7 +264,19 @@ public final class EVMBatchProver: Sendable {
     ) throws -> EVMBatchProof {
         let startTime = CFAbsoluteTimeGetCurrent()
 
-        // Initialize the block prover
+        // Build compression config from batch config
+        let compressionConfig = ProofCompressionConfig(
+            logTraceLength: config.logTraceLength,
+            logBlowup: config.logBlowup,
+            numQueries: config.numQueries,
+            provingColumnCount: config.provingColumnCount,
+            criticalColumnIndices: config.criticalColumnIndices,
+            enableTwoTierProving: false,
+            tier1NumQueries: 4,
+            tier2NumQueries: config.numQueries
+        )
+
+        // Initialize the block prover with compression config
         let blockProverConfig = BlockProvingConfig(
             numQueries: config.numQueries,
             logBlowup: config.logBlowup,
@@ -249,7 +289,7 @@ public final class EVMBatchProver: Sendable {
 
         let blockProver: EVMetalBlockProver
         do {
-            blockProver = try EVMetalBlockProver(config: blockProverConfig)
+            blockProver = try EVMetalBlockProver(config: blockProverConfig, compressionConfig: compressionConfig)
         } catch {
             throw BatchProverError.blockProverInitFailed(error)
         }
@@ -259,9 +299,11 @@ public final class EVMBatchProver: Sendable {
         var asyncError: Error?
         var blockProofResult: BlockProof?
 
+        print("[BatchProver] About to create Task for block prover...")
+        fflush(stdout)
         Task {
             do {
-                print("[BatchProver] Starting block prover.prove()...")
+                print("[BatchProver] Task started, calling blockProver.prove()...")
                 fflush(stdout)
                 let result = try await blockProver.prove(
                     transactions: transactions,
