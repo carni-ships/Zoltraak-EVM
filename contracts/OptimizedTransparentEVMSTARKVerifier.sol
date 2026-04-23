@@ -73,100 +73,51 @@ contract OptimizedTransparentEVMSTARKVerifier {
         uint256[] memory _r,
         uint256[] memory _v
     ) public view returns (bool) {
-        uint256 gasStart = gasleft();
-
-        // ============================================
-        // Step 1: Quick sanity checks (least gas)
-        // ============================================
-
-        // Check 1a: Commitment not at max value (quick overflow check)
+        // Bounds check (least gas)
         if (_commitmentX >= BN254_Q || _commitmentY >= BN254_Q) {
-            emit VerificationFailed("Invalid coordinates", _stepCount);
             return false;
         }
 
-        // Check 1b: Public input count matches VK
-        uint256 numPubInputs = extractNumPublicInputs();
-        if (_publicInputs.length != numPubInputs) {
-            emit VerificationFailed("Public input count mismatch", _stepCount);
+        // Inline VK extraction (saves SLOAD vs function call)
+        if (_publicInputs.length != ((packedVK >> 248) & 0xFF)) {
             return false;
         }
 
-        // ============================================
-        // Step 2: Identity point check (inlined, cheap)
-        // ============================================
-
-        // Identity point: (0, 0)
-        // Fresh CCCS (u=1): commitment must NOT be identity
-        bool isIdentity = (_commitmentX == 0 && _commitmentY == 0);
-
-        if (_u == 1 && isIdentity) {
-            emit VerificationFailed("Fresh CCCS identity commitment", _stepCount);
+        // Identity check
+        if (_u == 1 && _commitmentX == 0 && _commitmentY == 0) {
             return false;
         }
 
-        // ============================================
-        // Step 3: Curve membership (only if not identity)
-        // ============================================
-
-        if (!isIdentity) {
-            // Inline y² = x³ + 3 check (saves gas vs function call)
+        // Curve check (y² = x³ + 3)
+        if (_commitmentX != 0 || _commitmentY != 0) {
             uint256 y2 = mulmod(_commitmentY, _commitmentY, BN254_Q);
             uint256 x2 = mulmod(_commitmentX, _commitmentX, BN254_Q);
             uint256 x3 = mulmod(x2, _commitmentX, BN254_Q);
-            uint256 rhs = addmod(x3, 3, BN254_Q);
-
-            if (y2 != rhs) {
-                emit VerificationFailed("Not on curve", _stepCount);
-                return false;
-            }
+            unchecked { if (y2 != x3 + 3) return false; }
         }
 
-        // ============================================
-        // Step 4: State hash consistency (optimistic)
-        // ============================================
-
-        if (optimisticMode) {
-            // In optimistic mode, we trust the state hash
-            // Full verification would recompute: keccak256(abi.encode(pubInputs, stepCount))
-            // Skipping saves ~20k gas
-        } else {
-            // Full hash verification
+        // State hash check (skip if optimistic)
+        if (!optimisticMode) {
             bytes32 computedHash = keccak256(abi.encodePacked(
                 _publicInputs[0],
                 _publicInputs[1],
                 _stepCount
             ));
-
             if (uint256(computedHash) != _stateHash) {
-                emit VerificationFailed("State hash mismatch", _stepCount);
                 return false;
             }
         }
 
-        // ============================================
-        // Step 5: MLE consistency (optional check)
-        // ============================================
-
-        // If r and v are provided, verify consistency
-        if (_r.length > 0) {
-            if (_r.length != _v.length) {
-                emit VerificationFailed("MLE length mismatch", _stepCount);
-                return false;
-            }
-
-            // Verify evaluations are in field
-            for (uint256 i = 0; i < _v.length; i++) {
-                if (_v[i] >= BN254_Q) {
-                    emit VerificationFailed("Invalid MLE eval", _stepCount);
-                    return false;
-                }
-            }
+        // MLE consistency check
+        uint256 rLen = _r.length;
+        if (rLen > 0 && rLen != _v.length) {
+            return false;
         }
 
-        // Success
-        uint256 gasUsed = gasStart - gasleft();
-        emit ProofVerified(_stepCount, gasUsed);
+        for (uint256 i = 0; i < rLen; i++) {
+            if (_v[i] >= BN254_Q) return false;
+        }
+
         return true;
     }
 
@@ -180,35 +131,22 @@ contract OptimizedTransparentEVMSTARKVerifier {
         uint256 _stepCount,
         uint256[] memory _r,
         uint256[] memory _v,
-        // CycleFold params
         uint256 _grumpkinAccX,
         uint256 _grumpkinAccY,
-        uint256 _grumpkinU
+        uint256
     ) public view returns (bool) {
-        // First verify the main proof
         if (!verify(_commitmentX, _commitmentY, _u, _publicInputs, _stateHash, _stepCount, _r, _v)) {
             return false;
         }
 
-        // Then verify Grumpkin accumulator (y² = x³ - 17)
+        // Grumpkin check (y² = x³ - 17)
         if (_grumpkinAccX != 0 || _grumpkinAccY != 0) {
             uint256 y2 = mulmod(_grumpkinAccY, _grumpkinAccY, BN254_Q);
             uint256 x2 = mulmod(_grumpkinAccX, _grumpkinAccX, BN254_Q);
             uint256 x3 = mulmod(x2, _grumpkinAccX, BN254_Q);
-
-            // x³ - 17 mod Q
-            uint256 rhs;
             unchecked {
-                if (x3 >= 17) {
-                    rhs = x3 - 17;
-                } else {
-                    rhs = BN254_Q - (17 - x3);
-                }
-            }
-
-            if (y2 != rhs) {
-                emit VerificationFailed("Grumpkin not on curve", _stepCount);
-                return false;
+                uint256 rhs = (x3 >= 17) ? x3 - 17 : BN254_Q - (17 - x3);
+                if (y2 != rhs) return false;
             }
         }
 
@@ -232,17 +170,55 @@ contract OptimizedTransparentEVMSTARKVerifier {
         uint256 len = _commitmentXs.length;
         bool[] memory results = new bool[](len);
 
+        // Cache optimisticMode once for all proofs
+        bool optimistic = optimisticMode;
+
         for (uint256 i = 0; i < len; i++) {
-            results[i] = verify(
-                _commitmentXs[i],
-                _commitmentYs[i],
-                _us[i],
-                _publicInputs[i],
-                _stateHashes[i],
-                _stepCounts[i],
-                new uint256[](0),  // Empty r
-                new uint256[](0)   // Empty v
-            );
+            uint256 commitmentX = _commitmentXs[i];
+            uint256 commitmentY = _commitmentYs[i];
+            uint256 u = _us[i];
+            uint256[] memory pubInputs = _publicInputs[i];
+
+            // Quick bounds check
+            if (commitmentX >= BN254_Q || commitmentY >= BN254_Q) {
+                results[i] = false;
+                continue;
+            }
+
+            // Inline VK extraction
+            if (pubInputs.length != ((packedVK >> 248) & 0xFF)) {
+                results[i] = false;
+                continue;
+            }
+
+            // Identity check
+            if (u == 1 && commitmentX == 0 && commitmentY == 0) {
+                results[i] = false;
+                continue;
+            }
+
+            // Curve check (if not identity)
+            if (!(commitmentX == 0 && commitmentY == 0)) {
+                uint256 y2 = mulmod(commitmentY, commitmentY, BN254_Q);
+                uint256 x2 = mulmod(commitmentX, commitmentX, BN254_Q);
+                uint256 x3 = mulmod(x2, commitmentX, BN254_Q);
+                unchecked { if (y2 != x3 + 3) { results[i] = false; continue; } }
+            }
+
+            // State hash check
+            if (!optimistic) {
+                bytes32 computedHash = keccak256(abi.encodePacked(
+                    pubInputs[0],
+                    pubInputs[1],
+                    _stepCounts[i]
+                ));
+                if (uint256(computedHash) != _stateHashes[i]) {
+                    results[i] = false;
+                    continue;
+                }
+            }
+
+            results[i] = true;
         }
 
         return results;

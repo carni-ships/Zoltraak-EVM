@@ -103,21 +103,35 @@ contract TransparentEVMSTARKVerifier {
     function verifyTransparentProof(
         TransparentProof memory _proof,
         CycleFoldProof memory _cycleFoldProof
-    ) public view returns (bool) {
-        // Step 1: Verify Pedersen commitment is on BN254 curve
-        if (!verifyOnCurveBN254(_proof.commitment[0], _proof.commitment[1])) {
-            emit VerificationFailed("Commitment not on curve", _proof.stepCount);
+    ) public returns (bool) {
+        // Bounds check on commitment coordinates
+        if (_proof.commitment[0] >= BN254_Q || _proof.commitment[1] >= BN254_Q) {
+            emit VerificationFailed("Invalid commitment", _proof.stepCount);
             return false;
         }
 
-        // Step 2: Verify public input count matches
+        // Public input count check
         if (_proof.publicInputs.length != numPublicInputs) {
             emit VerificationFailed("Public input count mismatch", _proof.stepCount);
             return false;
         }
 
-        // Step 3: Verify state hash consistency
-        // stateHash = hash(accumulatedRoot, proofChainHash, blockCount)
+        // Identity point check (inlined)
+        bool identityCheck = (_proof.commitment[0] == 0 && _proof.commitment[1] == 0);
+        if (_proof.u == 1 && identityCheck) {
+            emit VerificationFailed("Fresh CCCS has identity commitment", _proof.stepCount);
+            return false;
+        }
+
+        // Curve membership check (inline, skip if identity)
+        if (!identityCheck) {
+            uint256 y2 = mulmod(_proof.commitment[1], _proof.commitment[1], BN254_Q);
+            uint256 x2 = mulmod(_proof.commitment[0], _proof.commitment[0], BN254_Q);
+            uint256 x3 = mulmod(x2, _proof.commitment[0], BN254_Q);
+            unchecked { if (y2 != x3 + 3) { emit VerificationFailed("Not on curve", _proof.stepCount); return false; } }
+        }
+
+        // State hash verification
         bytes32 computedHash = keccak256(abi.encodePacked(
             _proof.publicInputs[0],
             _proof.publicInputs[1],
@@ -128,29 +142,31 @@ contract TransparentEVMSTARKVerifier {
             return false;
         }
 
-        // Step 4: Verify commitment structure
-        // For fresh CCCS (u=1): commitment should be non-identity
-        // For relaxed CCCS (u≠1): commitment could be identity
-        if (_proof.u == 1) {
-            // Fresh CCCS: commitment should not be G1 generator raised to power 0
-            if (isIdentity(_proof.commitment[0], _proof.commitment[1])) {
-                emit VerificationFailed("Fresh CCCS has identity commitment", _proof.stepCount);
-                return false;
-            }
-        }
-
-        // Step 5: Verify MLE evaluations consistency
-        if (!verifyMLEConsistency(_proof.r, _proof.v)) {
+        // MLE consistency check (inlined)
+        uint256 rLen = _proof.r.length;
+        if (rLen > 0 && rLen != _proof.v.length) {
             emit VerificationFailed("MLE evaluation check failed", _proof.stepCount);
             return false;
         }
 
-        // Step 6: Verify CycleFold proof (if provided)
-        if (address(this) != address(0)) {
-            // Check Grumpkin accumulator validity
-            if (!verifyGrumpkinAccumulator(_cycleFoldProof.accX, _cycleFoldProof.accY)) {
-                emit VerificationFailed("Grumpkin accumulator invalid", _proof.stepCount);
+        for (uint256 i = 0; i < rLen; i++) {
+            if (_proof.v[i] >= BN254_Q) {
+                emit VerificationFailed("MLE out of bounds", _proof.stepCount);
                 return false;
+            }
+        }
+
+        // CycleFold check (skip identity point)
+        if (!(_cycleFoldProof.accX == 0 && _cycleFoldProof.accY == 0)) {
+            uint256 grumpkinY2 = mulmod(_cycleFoldProof.accY, _cycleFoldProof.accY, BN254_Q);
+            uint256 grumpkinX2 = mulmod(_cycleFoldProof.accX, _cycleFoldProof.accX, BN254_Q);
+            uint256 grumpkinX3 = mulmod(grumpkinX2, _cycleFoldProof.accX, BN254_Q);
+            unchecked {
+                uint256 rhs = (grumpkinX3 >= 17) ? grumpkinX3 - 17 : BN254_Q - (17 - grumpkinX3);
+                if (grumpkinY2 != rhs) {
+                    emit VerificationFailed("Grumpkin accumulator invalid", _proof.stepCount);
+                    return false;
+                }
             }
         }
 
@@ -162,7 +178,7 @@ contract TransparentEVMSTARKVerifier {
     function verifyBatch(
         TransparentProof[] memory _proofs,
         CycleFoldProof[] memory _cycleFoldProofs
-    ) public view returns (bool[] memory) {
+    ) public returns (bool[] memory) {
         bool[] memory results = new bool[](_proofs.length);
         for (uint256 i = 0; i < _proofs.length; i++) {
             results[i] = verifyTransparentProof(_proofs[i], _cycleFoldProofs[i]);

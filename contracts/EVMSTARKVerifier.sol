@@ -170,18 +170,24 @@ contract EVMSTARKVerifier {
         uint256[2][2] memory _b,
         uint256[2] memory _c,
         uint256[] memory _publicInputs,
-        uint256[3] memory _cycleFoldProof  // [accX, accY, u]
-    ) public view returns (bool) {
-        // Step 1: Verify CycleFold Grumpkin accumulator
-        if (!verifyGrumpkinAccumulator(_cycleFoldProof[0], _cycleFoldProof[1])) {
-            emit VerificationFailed("Grumpkin accumulator invalid", _publicInputs[2]);
-            return false;
+        uint256[3] memory _cycleFoldProof
+    ) public returns (bool) {
+        // Grumpkin accumulator check (inlined)
+        if (!(_cycleFoldProof[0] == 0 && _cycleFoldProof[1] == 0)) {
+            uint256 grumpkinY2 = mulmod(_cycleFoldProof[1], _cycleFoldProof[1], BN254_Q);
+            uint256 grumpkinX2 = mulmod(_cycleFoldProof[0], _cycleFoldProof[0], BN254_Q);
+            uint256 grumpkinX3 = mulmod(grumpkinX2, _cycleFoldProof[0], BN254_Q);
+            unchecked {
+                uint256 rhs = (grumpkinX3 >= 17) ? grumpkinX3 - 17 : BN254_Q - (17 - grumpkinX3);
+                if (grumpkinY2 != rhs) {
+                    emit VerificationFailed("Grumpkin accumulator invalid", _publicInputs[2]);
+                    return false;
+                }
+            }
         }
 
-        // Step 2: Compute vk_x = IC[0] + sum(input[i] * IC[i+1])
+        // Compute vk_x and verify pairing
         uint256[2] memory vk_x = computePublicInputAccumulation(_publicInputs);
-
-        // Step 3: BN254 pairing check
         bool pairingValid = verifyPairing(_a, _b, _c, vk_x);
 
         if (pairingValid) {
@@ -194,7 +200,11 @@ contract EVMSTARKVerifier {
     }
 
     /// @notice Verify multiple IVC proofs in batch
-    /// @param _proofs Array of proof tuples
+    /// @param _a Array of G1 points A
+    /// @param _b Array of G2 points B
+    /// @param _c Array of G1 points C
+    /// @param _publicInputs Array of public inputs arrays
+    /// @param _cycleFoldProofs Array of CycleFold proofs
     /// @return Array of verification results
     function verifyBatch(
         uint256[2][] memory _a,
@@ -203,21 +213,12 @@ contract EVMSTARKVerifier {
         uint256[][] memory _publicInputs,
         uint256[3][] memory _cycleFoldProofs
     ) public view returns (bool[] memory) {
-        require(_a.length == _b.length, "Proof count mismatch");
-        require(_a.length == _c.length, "Proof count mismatch");
-        require(_a.length == _publicInputs.length, "Proof count mismatch");
-        require(_a.length == _cycleFoldProofs.length, "Proof count mismatch");
+        uint256 len = _a.length;
+        require(len == _b.length && len == _c.length && len == _publicInputs.length && len == _cycleFoldProofs.length, "Proof count mismatch");
 
-        bool[] memory results = new bool[](_a.length);
-
-        for (uint256 i = 0; i < _a.length; i++) {
-            results[i] = verifyIVCProof(
-                _a[i],
-                _b[i],
-                _c[i],
-                _publicInputs[i],
-                _cycleFoldProofs[i]
-            );
+        bool[] memory results = new bool[](len);
+        for (uint256 i = 0; i < len; i++) {
+            results[i] = verifyIVCProof(_a[i], _b[i], _c[i], _publicInputs[i], _cycleFoldProofs[i]);
         }
 
         return results;
@@ -232,11 +233,12 @@ contract EVMSTARKVerifier {
     /// @return vk_x Accumulated public input point
     function computePublicInputAccumulation(uint256[] memory _publicInputs)
         internal view
-        returns (uint256[2] memory)
+        returns (uint256[2] memory vk_x)
     {
-        uint256[2] memory vk_x = [icX[0], icY[0]];
+        vk_x = [icX[0], icY[0]];
 
-        for (uint256 i = 0; i < _publicInputs.length; i++) {
+        uint256 len = _publicInputs.length;
+        for (uint256 i = 0; i < len; ) {
             // Scalar multiplication: IC[i+1] * input[i]
             uint256[3] memory mulInput;
             mulInput[0] = icX[i + 1];
@@ -260,9 +262,9 @@ contract EVMSTARKVerifier {
                 let success := staticcall(gas(), 0x06, addInput, 0x80, vk_x, 0x40)
                 if iszero(success) { revert(0, 0) }
             }
-        }
 
-        return vk_x;
+            unchecked { i++; }
+        }
     }
 
     /// @notice Verify the BN254 pairing equation
