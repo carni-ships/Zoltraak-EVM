@@ -183,6 +183,18 @@ case "compression-tests":
         }
     }
 
+case "eth-live":
+    // Live Ethereum proving mode
+    let blockCount = args.count > 2 ? Int(args[2]) ?? 1 : 1
+    let quietMode = args.contains("-q") || args.contains("--quiet")
+    runLiveProvingMode(blockCount: blockCount, quiet: quietMode)
+
+case "eth-live-cont":
+    // Continuous live proving - run forever
+    let blockLimit = args.count > 2 ? Int(args[2]) ?? 0 : 0  // 0 = unlimited
+    let quietMode = args.contains("-q") || args.contains("--quiet")
+    runContinuousLiveProving(blockLimit: blockLimit, quiet: quietMode)
+
 default:
     print("=== EVMetal Prover Test Suite ===\n")
     ProverTests.runAllTests()
