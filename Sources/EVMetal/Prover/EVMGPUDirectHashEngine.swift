@@ -180,6 +180,7 @@ public final class EVMGPUDirectHashEngine {
     /// Hash multiple columns directly from GPU buffers.
     ///
     /// All columns are hashed in a single GPU dispatch for maximum parallelism.
+    /// Uses a shared positions buffer for all columns (optimized batch processing).
     ///
     /// - Parameters:
     ///   - inputBuffers: Array of GPU buffers (one per column, from NTT output)
@@ -196,6 +197,21 @@ public final class EVMGPUDirectHashEngine {
 
         let digestStride = Self.digestSize * MemoryLayout<UInt32>.stride
 
+        // OPTIMIZATION: Create shared positions buffer once for all columns
+        // This avoids repeated CPU writes for each column
+        let posBufLength = evalLen * MemoryLayout<UInt32>.stride
+        guard let sharedPositionsBuffer = device.makeBuffer(length: posBufLength, options: .storageModeShared) else {
+            // Fallback: will create positions per column (slower)
+            return encodeHashColumnsGPUToGPUSimple(inputBuffers: inputBuffers, evalLen: evalLen, cmdBuf: cmdBuf)
+        }
+
+        // Initialize positions buffer on GPU (sequential positions 0, 1, 2, ...)
+        let posPtr = sharedPositionsBuffer.contents().bindMemory(to: UInt32.self, capacity: evalLen)
+        for i in 0..<evalLen {
+            posPtr[i] = UInt32(i)
+        }
+
+        // Process all columns with shared positions buffer
         for inputBuffer in inputBuffers {
             // Create or reuse output buffer
             let outputLength = evalLen * digestStride
@@ -210,6 +226,46 @@ public final class EVMGPUDirectHashEngine {
                 outputBuffer = buf
             }
 
+            // Use the shared positions buffer (no CPU write per column!)
+            encodeHashGPUToGPU(
+                inputBuffer: inputBuffer,
+                positionsBuffer: sharedPositionsBuffer,
+                outputBuffer: outputBuffer,
+                count: evalLen,
+                cmdBuf: cmdBuf
+            )
+
+            outputBuffers.append(outputBuffer)
+        }
+
+        return outputBuffers
+    }
+
+    /// Simple fallback that creates positions buffer per column (slower).
+    private func encodeHashColumnsGPUToGPUSimple(
+        inputBuffers: [MTLBuffer],
+        evalLen: Int,
+        cmdBuf: MTLCommandBuffer
+    ) -> [MTLBuffer] {
+        var outputBuffers: [MTLBuffer] = []
+        outputBuffers.reserveCapacity(inputBuffers.count)
+
+        let digestStride = Self.digestSize * MemoryLayout<UInt32>.stride
+
+        for inputBuffer in inputBuffers {
+            let outputLength = evalLen * digestStride
+            let outputBuffer: MTLBuffer
+
+            if let pooled = outputBufferPool.popLast(), pooled.length >= outputLength {
+                outputBuffer = pooled
+            } else {
+                guard let buf = device.makeBuffer(length: outputLength, options: .storageModeShared) else {
+                    continue
+                }
+                outputBuffer = buf
+            }
+
+            // Use implicit positions (creates positions buffer per column - slower)
             encodeHashGPUToGPUWithImplicitPositions(
                 inputBuffer: inputBuffer,
                 outputBuffer: outputBuffer,
@@ -232,10 +288,12 @@ public final class EVMGPUDirectHashEngine {
     /// - Parameters:
     ///   - inputBuffers: GPU buffers from NTT (one per column)
     ///   - evalLen: Elements per column
+    ///   - commitAndWait: If true, commits and waits for completion before returning
     /// - Returns: GPU buffers with hashed digests (call getDigests to read back)
     public func hashColumnsAsync(
         inputBuffers: [MTLBuffer],
-        evalLen: Int
+        evalLen: Int,
+        commitAndWait: Bool = false
     ) throws -> (commit: MTLCommandBuffer, outputBuffers: [MTLBuffer]) {
         guard let cmdBuf = commandQueue.makeCommandBuffer() else {
             throw GPUProverError.noCommandBuffer
@@ -246,6 +304,15 @@ public final class EVMGPUDirectHashEngine {
             evalLen: evalLen,
             cmdBuf: cmdBuf
         )
+
+        // Optionally commit and wait (for async use cases)
+        if commitAndWait {
+            cmdBuf.commit()
+            cmdBuf.waitUntilCompleted()
+            if let error = cmdBuf.error {
+                throw GPUProverError.gpuError("hashColumnsAsync failed: \(error.localizedDescription)")
+            }
+        }
 
         return (cmdBuf, outputBuffers)
     }
@@ -304,11 +371,11 @@ public final class EVMGPUOnlyCommitmentPipeline {
 
     /// Execute the full GPU-only commitment pipeline.
     ///
-    /// This keeps all trace data on GPU from NTT through Merkle tree building.
+    /// This keeps all data on GPU from NTT through Merkle tree building.
     ///
     /// - Parameters:
     ///   - trace: Trace columns (CPU, for input only)
-    ///   - traceLen: Trace length
+    ///   - traceLen: Original trace length (before LDE)
     ///   - numColumns: Number of columns
     ///   - logTrace: Log of trace length
     ///   - logEval: Log of evaluation domain (logTrace + logBlowup)
@@ -324,6 +391,9 @@ public final class EVMGPUOnlyCommitmentPipeline {
         let evalLen = 1 << logEval
         let sz = MemoryLayout<UInt32>.stride
 
+        // Check if trace is already LDE-extended
+        let isAlreadyExtended = !trace.isEmpty && trace[0].count >= evalLen
+
         // === Phase 1: Copy trace to GPU ===
         let copyT0 = CFAbsoluteTimeGetCurrent()
 
@@ -333,48 +403,64 @@ public final class EVMGPUOnlyCommitmentPipeline {
                 throw GPUProverError.gpuError("Failed to allocate buffer")
             }
             let ptr = buf.contents().bindMemory(to: UInt32.self, capacity: evalLen)
-            for i in 0..<min(col.count, traceLen) {
-                ptr[i] = col[i].v
-            }
-            for i in col.count..<traceLen {
-                ptr[i] = 0
-            }
-            for i in traceLen..<evalLen {
-                ptr[i] = 0
+
+            if isAlreadyExtended {
+                // Trace already LDE-extended: copy first evalLen values directly
+                for i in 0..<min(col.count, evalLen) {
+                    ptr[i] = col[i].v
+                }
+            } else {
+                // Trace needs LDE: copy traceLen, zero pad rest
+                for i in 0..<min(col.count, traceLen) {
+                    ptr[i] = col[i].v
+                }
+                for i in col.count..<traceLen {
+                    ptr[i] = 0
+                }
+                for i in traceLen..<evalLen {
+                    ptr[i] = 0
+                }
             }
             gpuBuffers.append(buf)
         }
         let copyMs = (CFAbsoluteTimeGetCurrent() - copyT0) * 1000
 
-        // === Phase 2: GPU Circle NTT (INTT + NTT) ===
+        // === Phase 2: GPU Circle NTT (only if trace not already extended) ===
         let nttT0 = CFAbsoluteTimeGetCurrent()
+        var nttMs: Double = 0
 
-        guard let cbIntt = commandQueue.makeCommandBuffer() else {
-            throw GPUProverError.noCommandBuffer
-        }
-        for buf in gpuBuffers {
-            nttEngine.encodeINTT(data: buf, logN: logTrace, cmdBuf: cbIntt)
-        }
-        cbIntt.commit()
-        cbIntt.waitUntilCompleted()
+        if !isAlreadyExtended {
+            guard let cbIntt = commandQueue.makeCommandBuffer() else {
+                throw GPUProverError.noCommandBuffer
+            }
+            for buf in gpuBuffers {
+                nttEngine.encodeINTT(data: buf, logN: logTrace, cmdBuf: cbIntt)
+            }
+            cbIntt.commit()
+            cbIntt.waitUntilCompleted()
 
-        guard let cbNtt = commandQueue.makeCommandBuffer() else {
-            throw GPUProverError.noCommandBuffer
+            guard let cbNtt = commandQueue.makeCommandBuffer() else {
+                throw GPUProverError.noCommandBuffer
+            }
+            for buf in gpuBuffers {
+                nttEngine.encodeNTT(data: buf, logN: logEval, cmdBuf: cbNtt)
+            }
+            cbNtt.commit()
+            cbNtt.waitUntilCompleted()
         }
-        for buf in gpuBuffers {
-            nttEngine.encodeNTT(data: buf, logN: logEval, cmdBuf: cbNtt)
-        }
-        cbNtt.commit()
-        cbNtt.waitUntilCompleted()
-        let nttMs = (CFAbsoluteTimeGetCurrent() - nttT0) * 1000
+        nttMs = (CFAbsoluteTimeGetCurrent() - nttT0) * 1000
 
         // === Phase 3: GPU Leaf Hashing (directly from GPU buffers!) ===
         let hashT0 = CFAbsoluteTimeGetCurrent()
 
-        let (_, hashedBuffers) = try hashEngine.hashColumnsAsync(
+        let (hashCmdBuf, hashedBuffers) = try hashEngine.hashColumnsAsync(
             inputBuffers: gpuBuffers,
-            evalLen: evalLen
+            evalLen: evalLen,
+            commitAndWait: true  // Commit and wait so GPU processes the hashing
         )
+        if let error = hashCmdBuf.error {
+            throw GPUProverError.gpuError("Leaf hashing failed: \(error.localizedDescription)")
+        }
         let hashMs = (CFAbsoluteTimeGetCurrent() - hashT0) * 1000
 
         // === Phase 4: GPU Merkle Tree Building (directly from GPU buffers - NO CPU READBACK!) ===
