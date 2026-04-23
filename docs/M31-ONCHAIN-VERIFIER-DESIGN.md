@@ -34,7 +34,7 @@ Direct on-chain M31 verification is **economically prohibitive** (~9-10M gas vs 
 ### Taiko Architecture (Type 1 ZK-EVM)
 - Recursively aggregates STARK proofs into a single SNARK
 - Multi-step: M31 STARK → recursive aggregation → BN254 → L1 verification
-- **Recommended approach for EVMetal**
+- **Recommended approach for Zoltraak**
 
 **Key Insight**: All production systems ultimately convert to BN254 for on-chain verification.
 
@@ -595,7 +595,7 @@ contract BatchVerifier {
 ```
 EVM Transaction
     ↓
-EVMetal GPU Prover (M31 Circle STARK)
+Zoltraak GPU Prover (M31 Circle STARK)
     ↓
 Recursive Aggregator (M31 → BN254)
     ↓
@@ -663,11 +663,11 @@ Ethereum L1 Verifier (~400k-600k gas)
 
 | File | Purpose |
 |------|---------|
-| `Sources/EVMetal/Hash/M31Word.swift` | M31 field representation with 9-limb 256-bit decomposition. Use as spec for Solidity implementation. |
-| `Sources/EVMetal/Verifier/EVMVerifier.swift` | Proof structure and verification flow. Contains `CircleSTARKProof` structure with `traceCommitments`, `queryResponses`, `friProof.rounds`. |
-| `Sources/EVMetal/Prover/ProofCompressionConfig.swift` | Security parameters: logBlowup=2, numQueries=20, extensionDegree=4, provingColumnCount=32. Must match between prover and verifier. |
-| `Sources/EVMetal/AIR/EVMAIR.swift` | 180 columns, 20 constraints with degrees [1,1,1,1,1,1,1,1,1,1,2,2,2,2,2,3,3,3,3,3]. Boundary constraints at row 0. |
-| `Sources/EVMetal/Prover/EVMGPUCircleSTARKProverEngine.swift` | Configuration: logBlowup=2, numQueries=20, extensionDegree=4, numQuotientSplits=2, usePoseidon2Merkle=true. |
+| `Sources/Zoltraak/Hash/M31Word.swift` | M31 field representation with 9-limb 256-bit decomposition. Use as spec for Solidity implementation. |
+| `Sources/Zoltraak/Verifier/EVMVerifier.swift` | Proof structure and verification flow. Contains `CircleSTARKProof` structure with `traceCommitments`, `queryResponses`, `friProof.rounds`. |
+| `Sources/Zoltraak/Prover/ProofCompressionConfig.swift` | Security parameters: logBlowup=2, numQueries=20, extensionDegree=4, provingColumnCount=32. Must match between prover and verifier. |
+| `Sources/Zoltraak/AIR/EVMAIR.swift` | 180 columns, 20 constraints with degrees [1,1,1,1,1,1,1,1,1,1,2,2,2,2,2,3,3,3,3,3]. Boundary constraints at row 0. |
+| `Sources/Zoltraak/Prover/EVMGPUCircleSTARKProverEngine.swift` | Configuration: logBlowup=2, numQueries=20, extensionDegree=4, numQuotientSplits=2, usePoseidon2Merkle=true. |
 
 ---
 
@@ -679,7 +679,7 @@ Ethereum L1 Verifier (~400k-600k gas)
 2. **Medium-term**: Build recursive aggregation infrastructure (M31 → BN254)
 3. **Long-term**: Propose M31 precompile to Ethereum (if broader ecosystem interest)
 
-The gap is not a technical limitation—EVMetal can prove anything. The gap is **bridge infrastructure**: we need to convert M31 proofs to a format Ethereum understands.
+The gap is not a technical limitation—Zoltraak can prove anything. The gap is **bridge infrastructure**: we need to convert M31 proofs to a format Ethereum understands.
 
 ---
 

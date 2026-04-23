@@ -7,7 +7,7 @@
 
 ## Executive Summary
 
-**For single-sequencer rollups (like EVMetal's current architecture): NO, consensus rule proving is NOT necessary.**
+**For single-sequencer rollups (like Zoltraak's current architecture): NO, consensus rule proving is NOT necessary.**
 **For multi-sequencer/decentralized provers: YES, but with caveats.**
 
 The distinction between Type 1 and Type 2 zkEVMs is fundamentally about **trust models**, not technical capability. Type 1 (Taiko) targets Ethereum equivalence for trustless bridging. Type 2/3/4 (Polygon zkEVM, Scroll, zkSync) target application-level EVM equivalence where the sequencer is already trusted.
@@ -51,7 +51,7 @@ The distinction between Type 1 and Type 2 zkEVMs is fundamentally about **trust 
 | **Consensus Rules** | Prove block proposer signature, beacon state, execution payload | Only Type 1 (Taiko) |
 | **Bridge Withdrawal** | Prove L1 can trust L2 state | Trustless bridging requirements |
 
-**EVMetal currently proves Layer 1** (EVM bytecode execution via EVMAIR + Circle STARK).
+**Zoltraak currently proves Layer 1** (EVM bytecode execution via EVMAIR + Circle STARK).
 
 ---
 
@@ -61,7 +61,7 @@ The distinction between Type 1 and Type 2 zkEVMs is fundamentally about **trust 
 
 - Ethereum PoS uses **BLS12-381** for validator signatures, NOT secp256k1
 - The execution payload contains a `prev_randao` field from beacon chain
-- **Requires**: BLS12-381 precompiles (0x0E, 0x0F, 0x11, 0x12) — currently missing in EVMetal
+- **Requires**: BLS12-381 precompiles (0x0E, 0x0F, 0x11, 0x12) — currently missing in Zoltraak
 
 ### 3.2 Finality Gadget (Casper FFG)
 
@@ -85,11 +85,11 @@ The distinction between Type 1 and Type 2 zkEVMs is fundamentally about **trust 
 
 ## 4. Minimum Consensus Requirements by Use Case
 
-### Single Sequencer Rollup (EVMetal's current model)
+### Single Sequencer Rollup (Zoltraak's current model)
 
 ```
 MINIMUM REQUIRED:
-- EVM bytecode execution proof ✓ (EVMetal already does this)
+- EVM bytecode execution proof ✓ (Zoltraak already does this)
 - State root commitment (Merkle proof of L2 state)
 - No consensus proof needed (sequencer is trusted)
 
@@ -127,11 +127,11 @@ COMPLEXITY: ~10x more constraints than pure EVM execution
 
 ---
 
-## 5. Can EVMetal Prove Consensus Rules Using Existing STARK Infrastructure?
+## 5. Can Zoltraak Prove Consensus Rules Using Existing STARK Infrastructure?
 
 **Short answer: PARTIALLY, with significant additions required.**
 
-### What EVMetal Has
+### What Zoltraak Has
 
 - Circle STARK prover over M31 field (can prove arbitrary computations)
 - GPU-accelerated Poseidon2 hashing
@@ -140,7 +140,7 @@ COMPLEXITY: ~10x more constraints than pure EVM execution
 
 ### What's Missing for Consensus Proof
 
-| Component | Status in EVMetal | Required for Consensus |
+| Component | Status in Zoltraak | Required for Consensus |
 |-----------|-------------------|------------------------|
 | BLS12-381 G1/G2 map | Missing (Gap 5) | Required for validator sigs |
 | BLS12-381 pairing | Implemented (GPU) | Required for aggregate verification |
@@ -151,8 +151,8 @@ COMPLEXITY: ~10x more constraints than pure EVM execution
 
 ### Honest Assessment
 
-**For Single-Sequencer Model (Recommended for EVMetal):**
-- EVMetal's current architecture is SUFFICIENT
+**For Single-Sequencer Model (Recommended for Zoltraak):**
+- Zoltraak's current architecture is SUFFICIENT
 - Add Merkle proof verification for L2 state access (Gap 2)
 - No consensus proof needed
 - Bridge verification uses different mechanism (trusted oracle)
@@ -165,7 +165,7 @@ COMPLEXITY: ~10x more constraints than pure EVM execution
 
 ---
 
-## 6. Actionable Recommendations for EVMetal Roadmap
+## 6. Actionable Recommendations for Zoltraak Roadmap
 
 ### Phase 1: Current Trajectory (Single Sequencer)
 
@@ -185,7 +185,7 @@ SHORT-TERM (P1):
 
 ```
 REQUIREMENTS:
-- EVM bytecode execution proof ✓ (EVMetal does this)
+- EVM bytecode execution proof ✓ (Zoltraak does this)
 - L2 state witness generation ✓ (Gap 3)
 - Merkle proof verification for storage access ✓ (Gap 2)
 
@@ -205,14 +205,14 @@ REQUIREMENTS:
 - Casper FFG finality constraints
 
 ESTIMATED EFFORT: 6-12 months
-DECISION: Only needed if EVMetal wants trustless Ethereum bridging
+DECISION: Only needed if Zoltraak wants trustless Ethereum bridging
 ```
 
 ---
 
 ## Conclusion
 
-**EVMetal does NOT need to prove consensus rules for its current single-sequencer architecture.** This is the right call for a proving library focused on performance. Type 1 equivalence (Taiko) comes with significant complexity overhead that only matters for trustless L1 bridging.
+**Zoltraak does NOT need to prove consensus rules for its current single-sequencer architecture.** This is the right call for a proving library focused on performance. Type 1 equivalence (Taiko) comes with significant complexity overhead that only matters for trustless L1 bridging.
 
 **Recommended path forward:**
 1. Complete EVM opcode coverage and GPU optimization (current work)
@@ -220,7 +220,7 @@ DECISION: Only needed if EVMetal wants trustless Ethereum bridging
 3. Target Type 2 classification (Polygon/Scroll-equivalent)
 4. Revisit Type 1 only if trustless Ethereum bridge becomes a requirement
 
-The distinction is clear: **proving execution != proving consensus**. EVMetal correctly focuses on the former. Consensus proving is a separate product decision, not a technical necessity.
+The distinction is clear: **proving execution != proving consensus**. Zoltraak correctly focuses on the former. Consensus proving is a separate product decision, not a technical necessity.
 
 ---
 

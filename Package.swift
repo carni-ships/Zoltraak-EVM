@@ -2,41 +2,41 @@
 import PackageDescription
 
 let package = Package(
-    name: "EVMetal",
+    name: "Zoltraak",
     platforms: [
         .macOS(.v14)
     ],
     products: [
         .library(
-            name: "EVMetal",
-            targets: ["EVMetal"]),
+            name: "Zoltraak",
+            targets: ["Zoltraak"]),
         .executable(
-            name: "EVMetalRunner",
-            targets: ["EVMetalRunner"])
+            name: "ZoltraakRunner",
+            targets: ["ZoltraakRunner"])
     ],
     dependencies: [
         .package(path: "../zkMetal"),
     ],
     targets: [
         .target(
-            name: "EVMetal",
+            name: "Zoltraak",
             dependencies: [
                 .product(name: "zkMetal", package: "zkMetal"),
             ],
-            path: "Sources/EVMetal",
+            path: "Sources/Zoltraak",
             swiftSettings: [
                 .enableExperimentalFeature("macros"),
             ]
         ),
         .target(
-            name: "EVMetalRunner",
-            dependencies: ["EVMetal"],
-            path: "Sources/EVMetalTestRunner"
+            name: "ZoltraakRunner",
+            dependencies: ["Zoltraak"],
+            path: "Sources/ZoltraakTestRunner"
         ),
         .testTarget(
-            name: "EVMetalTests",
-            dependencies: ["EVMetal"],
-            path: "Tests/EVMetalTests"
+            name: "ZoltraakTests",
+            dependencies: ["Zoltraak"],
+            path: "Tests/ZoltraakTests"
         ),
     ]
 )

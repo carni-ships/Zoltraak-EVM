@@ -1,6 +1,6 @@
-# EVMetal Documentation
+# Zoltraak Documentation
 
-Technical documentation for the EVMetal ZK proving system.
+Technical documentation for the Zoltraak ZK proving system.
 
 ## Documentation Index
 
@@ -29,31 +29,31 @@ Technical documentation for the EVMetal ZK proving system.
 swift test
 
 # Specific test
-./EVMetalRunner test <name>
+./ZoltraakRunner test <name>
 
 # Benchmarks
-./EVMetalRunner benchmarks
+./ZoltraakRunner benchmarks
 ```
 
 ### Live Proving
 
 ```bash
 # Single block
-./EVMetalRunner eth-live 1
+./ZoltraakRunner eth-live 1
 
 # Continuous (until Ctrl+C)
-./EVMetalRunner eth-live-cont
+./ZoltraakRunner eth-live-cont
 
 # Quiet mode
-./EVMetalRunner eth-live 3 -q
+./ZoltraakRunner eth-live 3 -q
 ```
 
 ### Comparison Benchmarks
 
 ```bash
 # Full block comparison
-./EVMetalRunner full-compare
+./ZoltraakRunner full-compare
 
 # Phase 2/3 integration
-./EVMetalRunner phase-bench
+./ZoltraakRunner phase-bench
 ```

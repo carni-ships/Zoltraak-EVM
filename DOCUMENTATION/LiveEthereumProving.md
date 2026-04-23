@@ -4,26 +4,26 @@ Real-time STARK proof generation and verification against Ethereum mainnet.
 
 ## Overview
 
-`EVMetalRunner eth-live` fetches blocks from Ethereum RPC endpoints, generates Circle STARK proofs for each block using GPU acceleration, and verifies the proofs on-the-fly.
+`ZoltraakRunner eth-live` fetches blocks from Ethereum RPC endpoints, generates Circle STARK proofs for each block using GPU acceleration, and verifies the proofs on-the-fly.
 
 ## Quick Start
 
 ```bash
 # Prove a single block
-./EVMetalRunner eth-live 1
+./ZoltraakRunner eth-live 1
 
 # Prove 3 blocks
-./EVMetalRunner eth-live 3
+./ZoltraakRunner eth-live 3
 
 # Prove continuously (until Ctrl+C)
-./EVMetalRunner eth-live-cont
+./ZoltraakRunner eth-live-cont
 
 # Prove up to N blocks continuously
-./EVMetalRunner eth-live-cont 10
+./ZoltraakRunner eth-live-cont 10
 
 # Quiet mode (summary only)
-./EVMetalRunner eth-live 1 -q
-./EVMetalRunner eth-live-cont 5 -q
+./ZoltraakRunner eth-live 1 -q
+./ZoltraakRunner eth-live-cont 5 -q
 ```
 
 ## Architecture

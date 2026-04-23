@@ -1,12 +1,12 @@
 #!/bin/bash
-# EVMetal Build Script
+# Zoltraak Build Script
 # Usage: ./build.sh [debug|release]
 
 set -e
 
 BUILD_TYPE="${1:-release}"
 
-echo "=== EVMetal Build Script ==="
+echo "=== Zoltraak Build Script ==="
 
 # Check for required tools
 if ! command -v swift &> /dev/null; then
@@ -22,11 +22,11 @@ if [ -d "foundry" ] && [ ! -f "foundry/foundry.toml" ]; then
 fi
 
 # Build
-echo "Building EVMetal ($BUILD_TYPE)..."
+echo "Building Zoltraak ($BUILD_TYPE)..."
 swift build -c "$BUILD_TYPE"
 
 # Verify binary
-BINARY=".build/$BUILD_TYPE/EVMetalRunner"
+BINARY=".build/$BUILD_TYPE/ZoltraakRunner"
 if [ -f "$BINARY" ]; then
     echo "Build successful: $BINARY"
 

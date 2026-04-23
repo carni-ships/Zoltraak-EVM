@@ -2,7 +2,7 @@
 
 ## Overview
 
-EVMetal generates Circle STARK proofs over the M31 field (~9s per block, ~30KB proof). To verify these on Ethereum L1 efficiently, we convert to BN254 format using transparent recursive aggregation via Nova/HyperNova folding.
+Zoltraak generates Circle STARK proofs over the M31 field (~9s per block, ~30KB proof). To verify these on Ethereum L1 efficiently, we convert to BN254 format using transparent recursive aggregation via Nova/HyperNova folding.
 
 This document describes the implementation of the recursive aggregation pipeline that:
 1. Takes M31 Circle STARK proofs
@@ -15,7 +15,7 @@ This document describes the implementation of the recursive aggregation pipeline
 ```
 EVM Transaction
     ↓
-EVMetal GPU Prover (M31 Circle STARK)  [existing]
+Zoltraak GPU Prover (M31 Circle STARK)  [existing]
     ↓ ~30KB M31 proof
 M31 Circle STARK Proof
     ↓
@@ -170,11 +170,11 @@ Nova uses **transparent verification** - no trusted setup parameters (α, β, γ
 4. Optimistic mode (skip expensive hash)
 5. Minimal memory allocations
 
-## Integration with EVMetalBlockProver
+## Integration with ZoltraakBlockProver
 
 ```swift
 // Enable IVC
-let prover = try EVMetalBlockProver(config: .default)
+let prover = try ZoltraakBlockProver(config: .default)
 try prover.enableIVC(config: .default)
 
 // Prove blocks sequentially
@@ -227,12 +227,12 @@ require(verifier.verifyIVCProof(calldata));
 ## Files Created
 
 ```
-Sources/EVMetal/Aggregation/
+Sources/Zoltraak/Aggregation/
 ├── EVMCircleSTARKVerifierCircuit.swift  # R1CS circuit for M31 verifier
 ├── EVMCircleSTARKIVC.swift              # Nova IVC wrapper
 ├── EVMCycleFoldFinalizer.swift          # CycleFold optimization
 ├── EVMBN254Verifier.swift               # BN254 verification
-└── EVMetalBlockProver+IVC.swift         # Integration with block prover
+└── ZoltraakBlockProver+IVC.swift         # Integration with block prover
 
 contracts/
 └── EVMSTARKVerifier.sol                 # On-chain verifier

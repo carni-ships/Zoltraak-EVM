@@ -1,11 +1,11 @@
-# EVMetal Gap Analysis: EVM Proving Coverage
+# Zoltraak Gap Analysis: EVM Proving Coverage
 
 > Document created: 2026-04-22
 > Status: In Progress
 
 ## Overview
 
-EVMetal is a GPU-accelerated ZK-EVM proving system using Circle STARK over the Mersenne31 field. This document catalogs the gaps between current implementation and production-grade zkEVM systems (Polygon zkEVM, Scroll, Taiko, zkSync).
+Zoltraak is a GPU-accelerated ZK-EVM proving system using Circle STARK over the Mersenne31 field. This document catalogs the gaps between current implementation and production-grade zkEVM systems (Polygon zkEVM, Scroll, Taiko, zkSync).
 
 ---
 
@@ -13,7 +13,7 @@ EVMetal is a GPU-accelerated ZK-EVM proving system using Circle STARK over the M
 
 ### Problem
 
-EVMetal generates proofs in the **Mersenne31 field** (prime: 2^31 - 1), but Ethereum Mainnet verifies proofs on **BN254** (alt_bn128 curve). STARK proofs over M31 cannot be directly verified in EVM bytecode using BN254 pairings.
+Zoltraak generates proofs in the **Mersenne31 field** (prime: 2^31 - 1), but Ethereum Mainnet verifies proofs on **BN254** (alt_bn128 curve). STARK proofs over M31 cannot be directly verified in EVM bytecode using BN254 pairings.
 
 ### Impact
 
@@ -48,7 +48,7 @@ Production zkEVMs must handle:
 - `EXTCODEHASH`, `EXTCODESIZE`, `EXTCODECOPY` requiring code/state proofs
 - `BLOCKHASH` requiring historical block hash queries
 
-EVMetal currently assumes **pre-provided state** but doesn't verify Merkle proofs within the proving system.
+Zoltraak currently assumes **pre-provided state** but doesn't verify Merkle proofs within the proving system.
 
 ### Impact
 
@@ -102,7 +102,7 @@ Full EVM state consists of:
 - Code cache (all deployed bytecode)
 - Call stack (nested execution context)
 
-EVMetal generates execution traces but doesn't build complete state witnesses.
+Zoltraak generates execution traces but doesn't build complete state witnesses.
 
 ### Impact
 
@@ -148,7 +148,7 @@ public protocol EvmStateProvider: Sendable {
 | **Type 3** | Almost EVM equivalent (some opcodes differ) | — | ~95% |
 | **Type 4** | High-level language equivalence (no bytecode) | zkSync | ~90%, requires Solidity |
 
-### EVMetal Classification
+### Zoltraak Classification
 
 **Current**: Type 2 (EVM bytecode equivalence)
 - Executes EVM bytecode directly ✓

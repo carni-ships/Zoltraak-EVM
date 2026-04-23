@@ -1,4 +1,4 @@
-# EVMetal
+# Zoltraak
 
 **GPU-accelerated ZK proving for Ethereum blocks.** Generate STARK proofs for Ethereum transactions in ~10 seconds using Apple Silicon GPUs — fast enough to keep up with Ethereum's 12-second block time.
 
@@ -7,15 +7,15 @@
 - **Real-time proving**: ~10s/block on Apple Silicon M3 Max, verified in ~5ms
 - **Circle STARK**: Efficient proof system over the Mersenne-31 field with Poseidon2 hashing
 - **Unified block proofs**: Single proof for all transactions in a block (not one-per-tx)
-- **Live Ethereum mode**: `./EVMetalRunner eth-live` fetches and proves real mainnet blocks
+- **Live Ethereum mode**: `./ZoltraakRunner eth-live` fetches and proves real mainnet blocks
 - **On-chain verification**: Solidity verifiers for BN254 pairing checks (~300k gas)
 
 ## Quick Start
 
 ```bash
 # Clone the repo
-git clone https://github.com/carbearnara/EVMetal.git
-cd EVMetal
+git clone https://github.com/carbearnara/Zoltraak.git
+cd Zoltraak
 
 # Initialize submodules (needed for foundry/zkMetal dependencies)
 git submodule update --init --recursive
@@ -24,8 +24,8 @@ git submodule update --init --recursive
 swift build
 
 # Run the binary
-./.build/release/EVMetalRunner benchmarks
-./.build/release/EVMetalRunner eth-live 1
+./.build/release/ZoltraakRunner benchmarks
+./.build/release/ZoltraakRunner eth-live 1
 ```
 
 ## Architecture
@@ -43,8 +43,8 @@ Fetch blocks from Ethereum mainnet and generate STARK proofs in real-time:
 
 ```bash
 # Prove blocks against mainnet
-./EVMetalRunner eth-live 3        # Prove 3 blocks
-./EVMetalRunner eth-live-cont     # Continuous (until Ctrl+C)
+./ZoltraakRunner eth-live 3        # Prove 3 blocks
+./ZoltraakRunner eth-live-cont     # Continuous (until Ctrl+C)
 
 # Performance tracking
 # - Proving time: ~10-12s per block
@@ -58,7 +58,7 @@ See [DOCUMENTATION/LiveEthereumProving.md](DOCUMENTATION/LiveEthereumProving.md)
 
 | Component | Description |
 |-----------|-------------|
-| `EVMetalBlockProver` | Unified block proving (all txs in single proof) |
+| `ZoltraakBlockProver` | Unified block proving (all txs in single proof) |
 | `EVMBatchProver` | Batch proving with GPU acceleration |
 | `EVMGPUCircleSTARKProverEngine` | GPU Circle STARK proving |
 | `EVMVerifier` | Proof verification |
@@ -121,11 +121,11 @@ The EVM trace uses **180 columns** to capture execution state:
 
 ## Security Analysis
 
-EVMetal targets **~134 bits of security**, slightly exceeding the industry standard of 128 bits.
+Zoltraak targets **~134 bits of security**, slightly exceeding the industry standard of 128 bits.
 
 | System | Security Level | Notes |
 |--------|---------------|-------|
-| **EVMetal** | **~134 bits** | Targets 128 + margin for production safety |
+| **Zoltraak** | **~134 bits** | Targets 128 + margin for production safety |
 | Ethereum (BN254) | ~128 bits | Standard for EVM ZK circuits |
 | Groth16 zkSNARK | ~128 bits | Most deployed SNARK system |
 | STARKs (typical) | ~100-128 bits | Varies by configuration |

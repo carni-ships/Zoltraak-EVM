@@ -1,6 +1,6 @@
 # Proof Compression: Reducing Trace Tree Size While Maintaining Correctness
 
-This document describes the proof compression optimization implemented in EVMetal to reduce trace tree size while maintaining correctness guarantees.
+This document describes the proof compression optimization implemented in Zoltraak to reduce trace tree size while maintaining correctness guarantees.
 
 ## Overview
 
@@ -68,7 +68,7 @@ The soundness loss is: `log2(180 / provingColumns)` bits
 
 ### Default Critical Columns
 
-EVMetal defines 32 critical columns based on EVM execution semantics:
+Zoltraak defines 32 critical columns based on EVM execution semantics:
 
 ```swift
 // Execution flow (8 columns)
@@ -172,7 +172,7 @@ Still provides ~128-bit security with good margin
 
 ```swift
 // Create prover with default settings
-let prover = try EVMetalBlockProver()
+let prover = try ZoltraakBlockProver()
 
 // Generate proof
 let proof = try await prover.prove(
@@ -186,7 +186,7 @@ let proof = try await prover.prove(
 ```swift
 // Create prover with high compression
 let compression = ProofCompressionConfig.highCompression
-let prover = try EVMetalBlockProver(
+let prover = try ZoltraakBlockProver(
     config: .fast,
     compressionConfig: compression
 )
@@ -210,7 +210,7 @@ let compression = ProofCompressionConfig(
     tier2NumQueries: 50
 )
 
-let prover = try EVMetalBlockProver(
+let prover = try ZoltraakBlockProver(
     config: .fast,
     compressionConfig: compression
 )
@@ -234,7 +234,7 @@ verifyFull(result.tier2Proof)
 
 ```swift
 // Benchmark compression effectiveness
-let result = try await EVMetalBlockProver.benchmarkCompression(
+let result = try await ZoltraakBlockProver.benchmarkCompression(
     transactionCount: 123,
     compressionConfig: .highCompression
 )
@@ -259,7 +259,7 @@ For 123 transactions with logBlowup=1:
 
 1. **ProofCompressionConfig.swift**: Configuration and security analysis
 2. **BlockAIR.swift**: Column subset support in AIR
-3. **EVMetalBlockProver.swift**: Two-tier proving integration
+3. **ZoltraakBlockProver.swift**: Two-tier proving integration
 
 ### Security Properties
 
