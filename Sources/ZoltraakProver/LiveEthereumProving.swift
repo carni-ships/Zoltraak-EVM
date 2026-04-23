@@ -122,10 +122,14 @@ public func runLiveProvingMode(blockCount: Int, quiet: Bool = false) {
                 // Unified block proof - deserialize and verify
                 do {
                     let gpuProof = try deserializeGPUProof(from: blockProof)
-                    // For unified block proofs, deserialization success verifies proof structure.
-                    // Full FRI verification requires recomputing the full transcript, which needs
-                    // access to the prover's internal state. For now, accept deserialization success.
-                    starkVerified = 1
+                    // Verify Merkle paths and proof structure
+                    let verifier = EVMVerifier()
+                    if verifier.verify(gpuProof) {
+                        starkVerified = 1
+                    } else {
+                        starkFailed = 1
+                        print("    UNIFIED PROOF MERKLE VERIFICATION FAILED")
+                    }
                 } catch {
                     print("    UNIFIED DESERIALIZE FAILED: \(error)")
                 }
@@ -296,9 +300,12 @@ public func runContinuousLiveProving(blockLimit: Int, quiet: Bool = false) {
                 // Unified block proof - deserialize and verify
                 do {
                     let gpuProof = try deserializeGPUProof(from: blockProof)
-                    // For unified block proofs, deserialization success verifies proof structure.
-                    // Full FRI verification requires recomputing the full transcript.
-                    starkVerified = 1
+                    // Verify Merkle paths and proof structure
+                    if verifier.verify(gpuProof) {
+                        starkVerified = 1
+                    } else {
+                        print("    UNIFIED PROOF MERKLE VERIFICATION FAILED")
+                    }
                 } catch {
                     print("    UNIFIED DESERIALIZE FAILED: \(error)")
                 }
