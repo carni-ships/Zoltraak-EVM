@@ -75,38 +75,97 @@ import zkMetal
     /// Round constants buffer for the custom kernel
     private let rcBuffer: MTLBuffer
 
-    // MARK: - GPU Buffer Pool for Reuse
+    // MARK: - GPU Buffer Pool for Reuse (with double-buffering)
 
-    /// Reusable buffers for high-frequency operations (reduce allocation overhead)
-    private var bufferPool: [BufferEntry] = []
+    /// Reusable buffers with double-buffering for safe GPU reuse
+    private var bufferPools: [String: DoubleBuffer] = [:]
 
-    /// Buffer entry in the pool
-    private struct BufferEntry {
-        let buffer: MTLBuffer
+    /// Double-buffer entry for safe GPU reuse
+    private struct DoubleBuffer {
+        var buffers: [MTLBuffer] = [MTLBuffer]()
+        var currentIndex: Int = 0
+        var inUse: [Bool] = [false, false]
         let size: Int
         var lastUseTime: CFAbsoluteTime = 0
     }
 
-    /// Get or create a reusable buffer of the specified size
-    /// This reduces GPU memory allocation overhead
-    private func getOrCreateBuffer(size: Int) -> MTLBuffer? {
+    /// Get a buffer from the pool with double-buffering
+    /// Safe to reuse because GPU uses the other buffer while this one is being populated
+    private func getDoubleBufferedBuffer(key: String, size: Int, device: MTLDevice) -> MTLBuffer? {
         let now = CFAbsoluteTimeGetCurrent()
 
-        // Try to find an existing buffer of sufficient size
-        for i in 0..<bufferPool.count {
-            if bufferPool[i].size >= size {
-                bufferPool[i].lastUseTime = now
-                return bufferPool[i].buffer
+        if var pool = bufferPools[key] {
+            // Check if current buffer is safe to use (GPU finished with it)
+            if !pool.inUse[pool.currentIndex] {
+                pool.lastUseTime = now
+                bufferPools[key] = pool
+                return pool.buffers[pool.currentIndex]
+            }
+
+            // Current buffer still in use, try the other one
+            let otherIndex = (pool.currentIndex + 1) % 2
+            if !pool.inUse[otherIndex] {
+                pool.currentIndex = otherIndex
+                pool.lastUseTime = now
+                bufferPools[key] = pool
+                return pool.buffers[otherIndex]
+            }
+
+            // Both buffers in use, allocate a new one
+            if let newBuf = device.makeBuffer(length: size, options: .storageModeShared) {
+                pool.buffers.append(newBuf)
+                pool.inUse.append(false)
+                pool.lastUseTime = now
+                bufferPools[key] = pool
+                return newBuf
             }
         }
 
-        // Create new buffer
-        guard let buffer = device.makeBuffer(length: size, options: .storageModeShared) else {
+        // Create new double-buffer entry
+        guard let buf1 = device.makeBuffer(length: size, options: .storageModeShared),
+              let buf2 = device.makeBuffer(length: size, options: .storageModeShared) else {
             return nil
         }
 
-        bufferPool.append(BufferEntry(buffer: buffer, size: size, lastUseTime: now))
-        return buffer
+        bufferPools[key] = DoubleBuffer(
+            buffers: [buf1, buf2],
+            currentIndex: 0,
+            inUse: [false, false],
+            size: size,
+            lastUseTime: now
+        )
+        return buf1
+    }
+
+    /// Mark buffer as in-use (GPU is processing it)
+    private func markBufferInUse(key: String) {
+        if var pool = bufferPools[key] {
+            pool.inUse[pool.currentIndex] = true
+            bufferPools[key] = pool
+        }
+    }
+
+    /// Mark buffer as available (GPU finished with it)
+    private func markBufferAvailable(key: String, index: Int) {
+        if var pool = bufferPools[key], index < pool.inUse.count {
+            pool.inUse[index] = false
+            bufferPools[key] = pool
+        }
+    }
+
+    /// Cleanup old entries from buffer pool
+    private func cleanupBufferPool(maxAge: TimeInterval = 5.0) {
+        let now = CFAbsoluteTimeGetCurrent()
+        for key in bufferPools.keys {
+            if let pool = bufferPools[key], now - pool.lastUseTime > maxAge {
+                // Reset in-use flags for old entries
+                var updatedPool = pool
+                for i in 0..<updatedPool.inUse.count {
+                    updatedPool.inUse[i] = false
+                }
+                bufferPools[key] = updatedPool
+            }
+        }
     }
 
     public init() throws {
@@ -308,7 +367,8 @@ import zkMetal
 
         // Allocate input buffer: [tree0_all_leaves, tree1_all_leaves, ...]
         let totalInputVals = numTrees * numLeaves * nodeSize
-        guard let inputBuf = device.makeBuffer(length: totalInputVals * stride, options: .storageModeShared) else {
+        let inputKey = "input_small_\(totalInputVals)"
+        guard let inputBuf = getDoubleBufferedBuffer(key: inputKey, size: totalInputVals * stride, device: device) else {
             throw GPUProverError.gpuError("Failed to allocate input buffer")
         }
 
@@ -324,7 +384,8 @@ import zkMetal
 
         // Allocate output buffer for roots
         let rootBytes = numTrees * nodeSize * stride
-        guard let outputBuf = device.makeBuffer(length: rootBytes, options: .storageModeShared) else {
+        let outputKey = "output_small_\(rootBytes)"
+        guard let outputBuf = getDoubleBufferedBuffer(key: outputKey, size: rootBytes, device: device) else {
             throw GPUProverError.gpuError("Failed to allocate output buffer")
         }
 
@@ -371,12 +432,12 @@ import zkMetal
         let subtreeMax = Poseidon2M31Engine.merkleSubtreeSize
         let numSubtrees = numLeaves / subtreeMax
 
-        // Step 1: Flatten all trees' leaves into one buffer
-        // Layout: [tree0_subtree0, tree0_subtree1, ..., tree1_subtree0, ...]
+        // Step 1: Flatten all trees' leaves into one buffer (use double-buffering)
         let leavesPerTree = numSubtrees * subtreeMax * nodeSize
         let totalLeavesVals = numTrees * leavesPerTree
 
-        guard let leavesBuf = device.makeBuffer(length: totalLeavesVals * stride, options: .storageModeShared) else {
+        let leavesKey = "leaves_large_\(totalLeavesVals)"
+        guard let leavesBuf = getDoubleBufferedBuffer(key: leavesKey, size: totalLeavesVals * stride, device: device) else {
             throw GPUProverError.gpuError("Failed to allocate leaves buffer")
         }
 
@@ -392,11 +453,12 @@ import zkMetal
             }
         }
 
-        // Step 2: Allocate output buffer for subtree roots
+        // Step 2: Allocate output buffer for subtree roots (use double-buffering)
         let rootsPerTree = numSubtrees * nodeSize
         let rootsSize = numTrees * rootsPerTree * stride
 
-        guard let rootsBuf = device.makeBuffer(length: rootsSize, options: .storageModeShared) else {
+        let rootsKey = "roots_large_\(rootsSize)"
+        guard let rootsBuf = getDoubleBufferedBuffer(key: rootsKey, size: rootsSize, device: device) else {
             throw GPUProverError.gpuError("Failed to allocate roots buffer")
         }
 
