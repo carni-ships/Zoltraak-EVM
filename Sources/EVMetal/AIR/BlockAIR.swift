@@ -1,4 +1,5 @@
 import Foundation
+import Metal
 import zkMetal
 
 /// Block-level AIR that handles multi-transaction execution traces.
@@ -617,7 +618,7 @@ public struct BlockAIR: CircleAIR {
     ///
     /// Uses GPU merkleCommit for fast root computation, then returns empty trees.
     /// Auth paths will be computed on-demand in the prover.
-    public func commitWithTrees(trace: [[M31]]) throws -> CommitResult {
+    public func commitWithTrees(trace: [[M31]], preLDELength: Int? = nil) throws -> CommitResult {
         let numLeaves = 1 << logBlockTraceLength
         let numColumns = trace.count
 
@@ -631,36 +632,70 @@ public struct BlockAIR: CircleAIR {
         let treeStartTime = CFAbsoluteTimeGetCurrent()
         var commitments = [M31Digest]()
 
-        // Use GPU merkleCommit for fast root computation
+        // OPTIMIZATION: Try GPU-only pipeline if pre-LDE length is provided
+        // This allows doing LDE + hash + merkle all on GPU in one pass
+        // Skipping the separate LDE step saves CPU time and CPU-GPU transfer overhead
+        if let traceLen = preLDELength {
+            do {
+                let pipeline = try EVMGPUOnlyCommitmentPipeline(config: .init(logBlowup: 1, maxSubtreeLeaves: 512))
+                let pipelineStart = CFAbsoluteTimeGetCurrent()
+
+                let logTrace = logBlockTraceLength
+                let logEval = logTrace + 1  // logBlowup=1 for extended trace
+
+                let (_, gpuCommitments) = try pipeline.execute(
+                    trace: trace,
+                    traceLen: traceLen,
+                    numColumns: numColumns,
+                    logTrace: logTrace,
+                    logEval: logEval
+                )
+
+                let pipelineTime = CFAbsoluteTimeGetCurrent() - pipelineStart
+                print("[BlockAIR] GPU-only pipeline done in \(String(format: "%.1f", pipelineTime * 1000))ms")
+                print("[BlockAIR]   - NTT + Leaf Hash + Merkle all on GPU (no pre-LDE)")
+                fflush(stdout)
+
+                commitments = gpuCommitments
+            } catch {
+                print("[BlockAIR] GPU-only pipeline failed: \(error), falling back to buildTreesBatch")
+                fflush(stdout)
+                // Fall through to buildTreesBatch
+            }
+        }
+
+        // Use GPU merkleCommit for fast root computation (or fallback if pipeline not used)
         // NOTE: We always commit ALL columns, regardless of provingColumnIndices
         // Use batch GPU engine for parallel processing of all columns
-        do {
-            let gpuEngine = try EVMGPUMerkleEngine()
-            let gpuStart = CFAbsoluteTimeGetCurrent()
+        if commitments.isEmpty {
+            do {
+                let gpuEngine = try EVMGPUMerkleEngine()
+                let gpuStart = CFAbsoluteTimeGetCurrent()
 
-            // Use batch GPU engine to process ALL 180 columns in ONE GPU dispatch
-            // This is MUCH faster than sequential per-column processing
-            let batchRoots = try gpuEngine.buildTreesBatch(treesLeaves: trace)
+                // Use batch GPU engine to process ALL 180 columns in ONE GPU dispatch
+                // This is MUCH faster than sequential per-column processing
+                let batchRoots = try gpuEngine.buildTreesBatch(treesLeaves: trace)
 
-            // Convert M31Digest to M31 for commitment format
-            for rootDigest in batchRoots {
-                commitments.append(M31Digest(values: rootDigest.values))
-            }
-
-            let gpuTime = CFAbsoluteTimeGetCurrent() - gpuStart
-            print("[BlockAIR] GPU merkleCommit done in \(String(format: "%.1f", gpuTime * 1000))ms (\(numColumns) columns)")
-            fflush(stdout)
-        } catch {
-            print("[BlockAIR] GPU merkleCommit failed: \(error), falling back to CPU")
-            fflush(stdout)
-            // Fallback to CPU
-            for colIdx in 0..<numColumns {
-                if colIdx % 20 == 0 {
-                    print("[BlockAIR] CPU fallback: column \(colIdx)/\(numColumns)")
-                    fflush(stdout)
+                // Convert M31Digest to M31 for commitment format
+                for rootDigest in batchRoots {
+                    commitments.append(M31Digest(values: rootDigest.values))
                 }
-                let root = computeMerkleRootCPU(trace[colIdx])
-                commitments.append(root)
+
+                let gpuTime = CFAbsoluteTimeGetCurrent() - gpuStart
+                print("[BlockAIR] GPU merkleCommit done in \(String(format: "%.1f", gpuTime * 1000))ms (\(numColumns) columns)")
+                fflush(stdout)
+            } catch {
+                print("[BlockAIR] GPU merkleCommit failed: \(error), falling back to CPU")
+                fflush(stdout)
+                // Fallback to CPU
+                for colIdx in 0..<numColumns {
+                    if colIdx % 20 == 0 {
+                        print("[BlockAIR] CPU fallback: column \(colIdx)/\(numColumns)")
+                        fflush(stdout)
+                    }
+                    let root = computeMerkleRootCPU(trace[colIdx])
+                    commitments.append(root)
+                }
             }
         }
 

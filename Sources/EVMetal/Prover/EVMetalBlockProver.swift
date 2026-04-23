@@ -392,9 +392,12 @@ public final class EVMetalBlockProver {
         let ldeMs = (CFAbsoluteTimeGetCurrent() - ldeStart) * 1000
         print("[BlockProver] LDE time: \(String(format: "%.1f", ldeMs))ms")
 
-        // Phase 5: Commitment
+        // Phase 5: Commitment (with pre-LDE length for GPU-only pipeline)
         let commitStart = CFAbsoluteTimeGetCurrent()
-        let commitResult = try air.commitWithTrees(trace: traceLDEs)
+
+        // Pass the original trace length so commit can do LDE on GPU if needed
+        let commitResult = try air.commitWithTrees(trace: traceLDEs, preLDELength: blockTrace[0].count)
+
         let commitMs = (CFAbsoluteTimeGetCurrent() - commitStart) * 1000
         print("[BlockProver] Commit time: \(String(format: "%.1f", commitMs))ms")
 

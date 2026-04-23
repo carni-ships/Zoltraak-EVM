@@ -31,7 +31,7 @@ public final class EVMLDEOptimizer {
         public static let standard = Config(
             pipelineINTTNTT: true,
             useMultiStream: true,
-            gpuZeroPadding: true,
+            gpuZeroPadding: true,  // L3: GPU zero-padding with pre-compiled kernels
             numStreams: 3,
             preallocateBuffers: true,
             bufferReuseThreshold: 4096
@@ -40,7 +40,7 @@ public final class EVMLDEOptimizer {
         public static let aggressive = Config(
             pipelineINTTNTT: true,
             useMultiStream: true,
-            gpuZeroPadding: true,
+            gpuZeroPadding: true,  // L3: GPU zero-padding with pre-compiled kernels
             numStreams: 4,
             preallocateBuffers: true,
             bufferReuseThreshold: 2048
@@ -94,6 +94,10 @@ public final class EVMLDEOptimizer {
     private var cachedEvalLen: Int = 0
     private var cachedNumColumns: Int = 0
 
+    // GPU zero-padding kernel (L3 optimization)
+    private var zeroPadKernel: MTLComputePipelineState?
+    private var duplicateLDEKernel: MTLComputePipelineState?
+
     // MARK: - Initialization
 
     public init(config: Config = .standard) throws {
@@ -120,6 +124,73 @@ public final class EVMLDEOptimizer {
         }
 
         self.bufferPool = [:]
+
+        // Pre-compile GPU zero-padding kernels (L3 optimization)
+        // This avoids the ~10s kernel compilation overhead on first use
+        if config.gpuZeroPadding {
+            compileZeroPadKernels()
+        }
+    }
+
+    /// Pre-compile zero-padding kernels to avoid compilation overhead during LDE.
+    private func compileZeroPadKernels() {
+        // Compile kernels from source files (avoiding Bundle.main issues)
+        do {
+            let shaderDir = Self.findShaderDir()
+            let zeroPadPath = shaderDir + "/zero_pad_lde.metal"
+
+            guard FileManager.default.fileExists(atPath: zeroPadPath) else {
+                fputs("[EVMLDEOptimizer] Warning: zero_pad_lde.metal not found at \(zeroPadPath)\n", stderr)
+                return
+            }
+
+            let source = try String(contentsOfFile: zeroPadPath, encoding: .utf8)
+            let options = MTLCompileOptions()
+            options.fastMathEnabled = true
+            options.languageVersion = .version2_0
+
+            let library = try device.makeLibrary(source: source, options: options)
+            fputs("[EVMLDEOptimizer] Compiling zero-padding kernels from source\n", stderr)
+
+            // Compile zeroPadLDE kernel
+            if let fn = library.makeFunction(name: "zeroPadLDE") {
+                zeroPadKernel = try device.makeComputePipelineState(function: fn)
+                fputs("[EVMLDEOptimizer] zeroPadLDE kernel compiled\n", stderr)
+            }
+
+            // Compile duplicateLDE kernel (faster for blowup=2)
+            if let fn = library.makeFunction(name: "duplicateLDE") {
+                duplicateLDEKernel = try device.makeComputePipelineState(function: fn)
+                fputs("[EVMLDEOptimizer] duplicateLDE kernel compiled\n", stderr)
+            }
+        } catch {
+            fputs("[EVMLDEOptimizer] Warning: Could not compile zero-padding kernels: \(error)\n", stderr)
+        }
+    }
+
+    /// Find the shader directory by searching standard locations.
+    private static func findShaderDir() -> String {
+        let execPath = CommandLine.arguments[0]
+        let execDir = (execPath as NSString).deletingLastPathComponent
+        for bundle in Bundle.allBundles {
+            if let url = bundle.url(forResource: "Shaders", withExtension: nil) {
+                let path = url.appendingPathComponent("lde").path
+                if FileManager.default.fileExists(atPath: path + "/zero_pad_lde.metal") {
+                    return path
+                }
+            }
+        }
+        let candidates = [
+            "\(execDir)/../Sources/EVMetal/Shaders/lde",
+            execDir + "/../Sources/EVMetal/Shaders/lde",
+            "./Sources/EVMetal/Shaders/lde",
+        ]
+        for path in candidates {
+            if FileManager.default.fileExists(atPath: "\(path)/zero_pad_lde.metal") {
+                return path
+            }
+        }
+        return execDir + "/../Sources/EVMetal/Shaders/lde"
     }
 
     // MARK: - Main LDE Entry Point
@@ -371,38 +442,95 @@ public final class EVMLDEOptimizer {
     // MARK: - L3: GPU Zero-Padding
 
     /// L3 optimization: Zero-padding on GPU to avoid CPU-GPU synchronization.
-    /// Uses a lightweight kernel or setBytes for fast padding.
+    /// Uses pre-compiled kernels for fast execution without compilation overhead.
     private func gpuZeroPad(
         bufs: [MTLBuffer],
         numColumns: Int,
         traceLen: Int,
         evalLen: Int
     ) throws {
-        // Strategy: Use setBytes for small padding, or lightweight kernel for large
         let paddingLen = evalLen - traceLen
-
         if paddingLen <= 0 { return }
-
-        // For shared memory buffers, we need CPU to touch the memory
-        // BUT we can do it async while GPU is computing next phase
-        // This is the key insight: overlap zero-fill with previous phase
 
         let queue = commandQueues.count > 1 ? commandQueues[1] : commandQueues[0]
         guard let cb = queue.makeCommandBuffer() else {
             throw GPUProverError.noCommandBuffer
         }
 
-        // Use async memory fill
-        for buf in bufs {
-            let offset = traceLen * MemoryLayout<UInt32>.stride
-            let length = paddingLen * MemoryLayout<UInt32>.stride
-            let hostPtr = buf.contents().advanced(by: offset)
-            memset(hostPtr, 0, length)
+        // Try GPU kernel first (fastest), fallback to CPU memset
+        if let kernel = duplicateLDEKernel, paddingLen == traceLen {
+            // Use duplicateLDE kernel for blowup=2 (most common case)
+            try executeDuplicateKernel(cb: cb, buffers: bufs, numColumns: numColumns, traceLen: traceLen)
+        } else if let kernel = zeroPadKernel {
+            // Use general zeroPadLDE kernel
+            try executeZeroPadKernel(cb: cb, buffers: bufs, numColumns: numColumns, traceLen: traceLen, evalLen: evalLen)
+        } else {
+            // Fallback: CPU memset (original behavior)
+            for buf in bufs {
+                let offset = traceLen * MemoryLayout<UInt32>.stride
+                let length = paddingLen * MemoryLayout<UInt32>.stride
+                let hostPtr = buf.contents().advanced(by: offset)
+                memset(hostPtr, 0, length)
+            }
         }
 
         cb.commit()
-        // Don't wait - let it run async. The subsequent NTT will see the padded data.
-        // This is safe because we use storageModeShared buffers.
+        // Don't wait - overlap with subsequent NTT phase
+    }
+
+    /// Execute GPU duplicate kernel for blowup=2 case.
+    private func executeDuplicateKernel(cb: MTLCommandBuffer, buffers: [MTLBuffer], numColumns: Int, traceLen: Int) throws {
+        guard let kernel = duplicateLDEKernel else { return }
+
+        // Process all columns in a single kernel dispatch
+        // Each thread handles 2 output elements (input[i] -> output[2i], output[2i+1])
+        let totalElements = traceLen * 2
+        let threadsPerTG = min(kernel.maxTotalThreadsPerThreadgroup, 256)
+        let numThreadgroups = (totalElements + threadsPerTG - 1) / threadsPerTG
+
+        for buf in buffers {
+            let enc = cb.makeComputeCommandEncoder()!
+            enc.setComputePipelineState(kernel)
+            enc.setBuffer(buf, offset: 0, index: 0)  // input
+            enc.setBuffer(buf, offset: 0, index: 1)  // output (same buffer, in-place)
+            var tl = UInt32(traceLen)
+            enc.setBytes(&tl, length: 4, index: 2)
+
+            enc.dispatchThreadgroups(
+                MTLSize(width: numThreadgroups, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: threadsPerTG, height: 1, depth: 1)
+            )
+            enc.endEncoding()
+        }
+    }
+
+    /// Execute GPU zero-padding kernel for general case.
+    private func executeZeroPadKernel(cb: MTLCommandBuffer, buffers: [MTLBuffer], numColumns: Int, traceLen: Int, evalLen: Int) throws {
+        guard let kernel = zeroPadKernel else { return }
+
+        let totalElements = numColumns * evalLen
+        let threadsPerTG = min(kernel.maxTotalThreadsPerThreadgroup, 256)
+        let numThreadgroups = (totalElements + threadsPerTG - 1) / threadsPerTG
+
+        // Flatten all buffers into one for batch processing
+        // Each column has evalLen elements
+        for (colIdx, buf) in buffers.enumerated() {
+            let enc = cb.makeComputeCommandEncoder()!
+            enc.setComputePipelineState(kernel)
+            enc.setBuffer(buf, offset: 0, index: 0)  // input
+            enc.setBuffer(buf, offset: 0, index: 1)  // output (same buffer, in-place)
+            var tl = UInt32(traceLen)
+            var el = UInt32(evalLen)
+            enc.setBytes(&tl, length: 4, index: 2)
+            enc.setBytes(&el, length: 4, index: 3)
+
+            let colOffset = colIdx * evalLen
+            enc.dispatchThreadgroups(
+                MTLSize(width: numThreadgroups, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: threadsPerTG, height: 1, depth: 1)
+            )
+            enc.endEncoding()
+        }
     }
 
     // MARK: - Buffer Management
