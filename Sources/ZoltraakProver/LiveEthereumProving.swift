@@ -5,10 +5,24 @@ import NeonFieldOps
 
 // MARK: - Live Proving Functions
 
+public enum ProvingMode: Sendable {
+    /// Unified block proving - single aggregated proof for entire block (fastest)
+    case unified
+    /// Non-unified proving - individual transaction proofs via GPU multi-stream
+    case nonUnified
+    /// Pipeline-based proving with parallel execution
+    case pipeline
+}
+
 /// Run live proving mode against Ethereum mainnet
-public func runLiveProvingMode(blockCount: Int, quiet: Bool = false) {
+public func runLiveProvingMode(
+    blockCount: Int,
+    quiet: Bool = false,
+    mode: ProvingMode = .unified
+) {
     printZoltraakHeader()
     print("Live Ethereum Proving Mode")
+    print("Mode: \(modeDescription(mode))")
     print("============================")
     print("Quiet mode: \(quiet ? "ON" : "OFF") (summary only)")
     print("")
@@ -61,6 +75,17 @@ public func runLiveProvingMode(blockCount: Int, quiet: Bool = false) {
     print("REALTIME TRACKER: Proof vs Ethereum block time (12s/block)")
     print("")
 
+    // Select batch prover config based on mode
+    let batchConfig: BatchProverConfig
+    switch mode {
+    case .unified:
+        batchConfig = .unifiedBlock
+    case .nonUnified:
+        batchConfig = .nonUnified
+    case .pipeline:
+        batchConfig = .highThroughput
+    }
+
     for blockNum in start...end {
         if !quiet {
             print("Block #\(blockNum)")
@@ -100,7 +125,7 @@ public func runLiveProvingMode(blockCount: Int, quiet: Bool = false) {
         animation.start()
 
         do {
-            let batchProver = EVMBatchProver(config: .unifiedBlock)
+            let batchProver = EVMBatchProver(config: batchConfig)
             let evmTransactions = blockData.toEVMTransactions()
 
             let proof = try batchProver.proveBatch(transactions: evmTransactions)
@@ -134,8 +159,8 @@ public func runLiveProvingMode(blockCount: Int, quiet: Bool = false) {
                     print("    UNIFIED DESERIALIZE FAILED: \(error)")
                 }
             } else if !proof.transactionProofs.isEmpty {
-                // Transaction-level proofs
-                for txProof in proof.transactionProofs {
+                // Transaction-level proofs - verify each one
+                for (txIdx, txProof) in proof.transactionProofs.enumerated() {
                     let result = verifier.verify(txProof)
                     if case .valid = result {
                         starkVerified += 1
@@ -143,9 +168,9 @@ public func runLiveProvingMode(blockCount: Int, quiet: Bool = false) {
                         starkFailed += 1
                         if !quiet {
                             if case .invalid(let reason) = result {
-                                print("    VERIFY FAILED: \(reason)")
+                                print("    TX \(txIdx) VERIFY FAILED: \(reason)")
                             } else if case .error(let err) = result {
-                                print("    VERIFY ERROR: \(err)")
+                                print("    TX \(txIdx) VERIFY ERROR: \(err)")
                             }
                         }
                     }
@@ -164,11 +189,19 @@ public func runLiveProvingMode(blockCount: Int, quiet: Bool = false) {
 
             let realtimePct = Double(onTimeCount) / Double(successfulBlocks) * 100
 
+            // Count proofs based on mode
+            let proofCount: Int
+            if let blockProof = proof.aggregatedProof, !blockProof.isEmpty {
+                proofCount = 1  // Unified block proof
+            } else {
+                proofCount = proof.transactionProofs.count
+            }
+
             if quiet {
-                print("Block #\(blockNum): \(starkVerified)/\(proof.transactionProofs.count) STARK | \(String(format: "%.1f", proveTimeMs))ms prove | \(String(format: "%.1f", realtimePct))% realtime")
+                print("Block #\(blockNum): \(starkVerified)/\(proofCount) STARK | \(String(format: "%.1f", proveTimeMs))ms prove | \(String(format: "%.1f", realtimePct))% realtime")
             } else {
                 print("  PROOF GENERATED (\(String(format: "%.1f", proveTimeMs))ms)")
-                print("  STARK Verification: \(starkVerified)/\(proof.transactionProofs.count) valid (\(String(format: "%.2f", verifyTimeMs))ms)")
+                print("  STARK Verification: \(starkVerified)/\(proofCount) valid (\(String(format: "%.2f", verifyTimeMs))ms)")
                 print("  \(onTime ? "ON TIME" : "LATE") | Realtime rate: \(String(format: "%.1f", realtimePct))%")
             }
 
@@ -190,6 +223,7 @@ public func runLiveProvingMode(blockCount: Int, quiet: Bool = false) {
     print("=============================================")
     print("SUMMARY")
     print("=============================================")
+    print("Mode: \(modeDescription(mode))")
     print("Blocks: \(totalBlocks) | Success: \(successfulBlocks) | Failed: \(failedBlocks)")
     print("Realtime: \(String(format: "%.1f", realtimePct))% on-time (\(onTimeCount)/\(successfulBlocks))")
     print("Transactions: \(totalTxCount)")
@@ -201,13 +235,29 @@ public func runLiveProvingMode(blockCount: Int, quiet: Bool = false) {
 }
 
 /// Run continuous live proving against Ethereum mainnet
-public func runContinuousLiveProving(blockLimit: Int, quiet: Bool = false) {
+public func runContinuousLiveProving(
+    blockLimit: Int,
+    quiet: Bool = false,
+    mode: ProvingMode = .unified
+) {
     printZoltraakHeader()
     print("Continuous Live Ethereum Proving Mode")
+    print("Mode: \(modeDescription(mode))")
     print("===================================")
     print("Quiet mode: " + (quiet ? "ON" : "OFF") + " (summary only)")
     print("Block limit: \(blockLimit == 0 ? "unlimited" : "\(blockLimit)")")
     print("")
+
+    // Select batch prover config based on mode
+    let batchConfig: BatchProverConfig
+    switch mode {
+    case .unified:
+        batchConfig = .unifiedBlock
+    case .nonUnified:
+        batchConfig = .nonUnified
+    case .pipeline:
+        batchConfig = .highThroughput
+    }
 
     let endpoints = [
         "https://ethereum-rpc.publicnode.com",
@@ -281,7 +331,7 @@ public func runContinuousLiveProving(blockLimit: Int, quiet: Bool = false) {
         animation.start()
 
         do {
-            let batchProver = EVMBatchProver(config: .unifiedBlock)
+            let batchProver = EVMBatchProver(config: batchConfig)
             let evmTransactions = blockData.toEVMTransactions()
             let proof = try batchProver.proveBatch(transactions: evmTransactions)
 
@@ -310,7 +360,7 @@ public func runContinuousLiveProving(blockLimit: Int, quiet: Bool = false) {
                     print("    UNIFIED DESERIALIZE FAILED: \(error)")
                 }
             } else {
-                // Transaction-level proofs
+                // Transaction-level proofs - verify each
                 for txProof in proof.transactionProofs {
                     if case .valid = verifier.verify(txProof) {
                         starkVerified += 1
@@ -376,6 +426,7 @@ public func runContinuousLiveProving(blockLimit: Int, quiet: Bool = false) {
     print("=============================================")
     print("FINAL SUMMARY")
     print("=============================================")
+    print("Mode: \(modeDescription(mode))")
     print("Total time: \(String(format: "%.1f", elapsed))s")
     print("Blocks: \(totalBlocks) | Success: \(totalSuccessful) | Failed: \(totalFailed)")
     print("Realtime: \(String(format: "%.1f", realtimePct))% on-time (\(totalOnTime)/\(totalSuccessful))")
@@ -386,6 +437,19 @@ public func runContinuousLiveProving(blockLimit: Int, quiet: Bool = false) {
     print("")
     print("All Circle STARK proofs verified!")
     print("Continuous proving complete!")
+}
+
+// MARK: - Helper Functions
+
+private func modeDescription(_ mode: ProvingMode) -> String {
+    switch mode {
+    case .unified:
+        return "Unified Block (single aggregated proof, fastest)"
+    case .nonUnified:
+        return "Non-Unified (GPU multi-stream, per-tx proofs)"
+    case .pipeline:
+        return "Pipeline (parallel execution + proving)"
+    }
 }
 
 // MARK: - Helper Functions

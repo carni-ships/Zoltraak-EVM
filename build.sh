@@ -18,14 +18,18 @@ NC='\033[0m' # No Color
 # ASCII Art - Zoltraak title
 ZOLTRAAK_ART="
 ${CYAN}
-    ╔═══════════════════════════════════════╗
-    ║                                       ║
-    ║   ${MAGENTA}█▀▀ █▀█ █▄▀ ▄▀█ █▀█ █▀▀   ${CYAN}║
-    ║   ${MAGENTA}█▄▄ █▄█ █ █ █▄█ █▄█ █▄▄   ${CYAN}║
-    ║                                       ║
-    ║        ${YELLOW}EVM • STARK • GPU        ${CYAN}║
-    ║                                       ║
-    ╚═══════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════╗
+║                                                          ║
+║   ${MAGENTA}████  ${MAGENTA}       ${MAGENTA}████  ${MAGENTA}████  ${MAGENTA} ████  ${MAGENTA}████  ${MAGENTA}████  ${MAGENTA}████${CYAN}     ║
+║   ${MAGENTA}████  ${MAGENTA}       ${MAGENTA}████  ${MAGENTA}████  ${MAGENTA}████  ${MAGENTA}████  ${MAGENTA}████  ${MAGENTA}████${CYAN}     ║
+║   ${MAGENTA} ████ ${MAGENTA}       ${MAGENTA}██    ${MAGENTA}   ██ ${MAGENTA}████  ${MAGENTA}██    ${MAGENTA}██    ${MAGENTA}   ██${CYAN}     ║
+║   ${MAGENTA}   ████${MAGENTA}       ${MAGENTA}██    ${MAGENTA}   ██ ${MAGENTA}████  ${MAGENTA}██    ${MAGENTA}████  ${MAGENTA}  ████${CYAN}     ║
+║   ${MAGENTA}   ████${MAGENTA}       ${MAGENTA}██    ${MAGENTA}   ██ ${MAGENTA}████  ${MAGENTA}██    ${MAGENTA}████  ${MAGENTA} ████ ${CYAN}     ║
+║   ${MAGENTA}██████${MAGENTA}       ${MAGENTA}████  ${MAGENTA}████  ${MAGENTA}████  ${MAGENTA}████  ${MAGENTA}████  ${MAGENTA}██████${CYAN}     ║
+║                                                          ║
+║              ${YELLOW}EVM \u{2022} STARK \u{2022} GPU${CYAN}                          ║
+║                                                          ║
+╚══════════════════════════════════════════════════════════╝
 ${NC}"
 
 # Magic circle frames (8 frames for animation)
