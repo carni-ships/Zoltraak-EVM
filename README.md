@@ -110,12 +110,18 @@ EVMetal targets **~134 bits of security**, slightly exceeding the industry stand
 
 ## Solidity Verifiers
 
-On-chain BN254 verifiers in `contracts/`:
+On-chain verifiers in `contracts/`:
 
-| Contract | Description |
-|----------|-------------|
-| `TransparentEVMSTARKVerifier.sol` | Standard transparent verifier |
-| `OptimizedTransparentEVMSTARKVerifier.sol` | Gas-optimized version |
+| Contract | Description | Estimated Gas |
+|----------|-------------|---------------|
+| `TransparentEVMSTARKVerifier.sol` | Transparent Nova IVC verifier | ~50-70k |
+| `OptimizedTransparentEVMSTARKVerifier.sol` | Gas-optimized version | ~50k (optimistic mode) |
+| `EVMSTARKVerifier.sol` | BN254 pairing verifier | ~350k |
+
+The **transparent verifiers** use Nova IVC (no trusted setup), making them ideal for production. Gas estimates from Foundry tests:
+- Optimistic mode: ~50k gas
+- Full verification: ~70k gas
+- CycleFold extension: +15k gas
 
 ## Dependencies
 
