@@ -11,8 +11,8 @@ let package = Package(
             name: "Zoltraak",
             targets: ["Zoltraak"]),
         .executable(
-            name: "ZoltraakRunner",
-            targets: ["ZoltraakRunner"])
+            name: "ZoltraakProver",
+            targets: ["ZoltraakProver"])
     ],
     dependencies: [
         .package(path: "../zkMetal"),
@@ -30,9 +30,9 @@ let package = Package(
             ]
         ),
         .target(
-            name: "ZoltraakRunner",
+            name: "ZoltraakProver",
             dependencies: ["Zoltraak"],
-            path: "Sources/ZoltraakTestRunner"
+            path: "Sources/ZoltraakProver"
         ),
         .testTarget(
             name: "ZoltraakTests",

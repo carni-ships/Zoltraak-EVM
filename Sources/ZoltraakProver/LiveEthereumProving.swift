@@ -7,6 +7,7 @@ import NeonFieldOps
 
 /// Run live proving mode against Ethereum mainnet
 public func runLiveProvingMode(blockCount: Int, quiet: Bool = false) {
+    printZoltraakHeader()
     print("Live Ethereum Proving Mode")
     print("============================")
     print("Quiet mode: \(quiet ? "ON" : "OFF") (summary only)")
@@ -95,11 +96,16 @@ public func runLiveProvingMode(blockCount: Int, quiet: Bool = false) {
         totalTxCount += blockData.txCount
 
         let proveStart = CFAbsoluteTimeGetCurrent()
+        let animation = ProvingAnimation(message: "Proving block #\(blockNum)...")
+        animation.start()
+
         do {
             let batchProver = EVMBatchProver(config: .unifiedBlock)
             let evmTransactions = blockData.toEVMTransactions()
 
             let proof = try batchProver.proveBatch(transactions: evmTransactions)
+
+            animation.stop(success: true, finalMessage: "Block #\(blockNum) proved in \(String(format: "%.1f", (CFAbsoluteTimeGetCurrent() - proveStart) * 1000))ms")
 
             let proveTimeMs = (CFAbsoluteTimeGetCurrent() - proveStart) * 1000
             totalProveTimeMs += proveTimeMs
@@ -163,6 +169,7 @@ public func runLiveProvingMode(blockCount: Int, quiet: Bool = false) {
             }
 
         } catch {
+            animation.stop(success: false, finalMessage: "Block #\(blockNum) failed")
             let proveTimeMs = (CFAbsoluteTimeGetCurrent() - proveStart) * 1000
             print("  FAILED: \(error)")
             failedBlocks += 1
@@ -191,6 +198,7 @@ public func runLiveProvingMode(blockCount: Int, quiet: Bool = false) {
 
 /// Run continuous live proving against Ethereum mainnet
 public func runContinuousLiveProving(blockLimit: Int, quiet: Bool = false) {
+    printZoltraakHeader()
     print("Continuous Live Ethereum Proving Mode")
     print("===================================")
     print("Quiet mode: " + (quiet ? "ON" : "OFF") + " (summary only)")
@@ -265,10 +273,15 @@ public func runContinuousLiveProving(blockLimit: Int, quiet: Bool = false) {
         totalTxCount += blockData.txCount
 
         let proveStart = CFAbsoluteTimeGetCurrent()
+        let animation = ProvingAnimation(message: "Proving block #\(nextBlockToProve)...")
+        animation.start()
+
         do {
             let batchProver = EVMBatchProver(config: .unifiedBlock)
             let evmTransactions = blockData.toEVMTransactions()
             let proof = try batchProver.proveBatch(transactions: evmTransactions)
+
+            animation.stop(success: true, finalMessage: "Block #\(nextBlockToProve) verified")
 
             let proveTimeMs = (CFAbsoluteTimeGetCurrent() - proveStart) * 1000
             totalProveTimeMs += proveTimeMs
@@ -324,6 +337,7 @@ public func runContinuousLiveProving(blockLimit: Int, quiet: Bool = false) {
             }
 
         } catch {
+            animation.stop(success: false, finalMessage: "Block #\(nextBlockToProve) failed")
             print("Block #\(nextBlockToProve): FAILED - \(error)")
             totalFailed += 1
         }

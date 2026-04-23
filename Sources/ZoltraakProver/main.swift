@@ -3,28 +3,36 @@ import zkMetal
 import Zoltraak
 
 /// Command-line arguments for running tests:
-///   ./ZoltraakRunner              - Run all tests
-///   ./ZoltraakRunner benchmarks   - Run benchmarks
-///   ./ZoltraakRunner quick       - Run quick tests (skip slow E2E)
-///   ./ZoltraakRunner gpu         - Run GPU batch tests only
-///   ./ZoltraakRunner e2e         - Run E2E tests only
-///   ./ZoltraakRunner opcode      - Run opcode tests only
-///   ./ZoltraakRunner phase-bench - Run Phase 2/3 integration benchmark
-///   ./ZoltraakRunner comparison  - Run comparison benchmark
-///   ./ZoltraakRunner unified    - Run unified block proof benchmark
-///   ./ZoltraakRunner full-compare - Run full block comparison
-///   ./ZoltraakRunner real-block [num] - Fetch and test real Ethereum block
-///   ./ZoltraakRunner real-block-unified [num] - Fetch and test real block with unified proving
-///   ./ZoltraakRunner real-block-unified [num] [compression] - compression: standard (32 cols), fast (16 cols)
-///   ./ZoltraakRunner synthetic-block - Run synthetic block benchmark
-///   ./ZoltraakRunner test <name> - Run specific test by name
-///   ./ZoltraakRunner compression - Run proof compression benchmarks
-///   ./ZoltraakRunner compression-compare - Compare baseline vs compressed
-///   ./ZoltraakRunner compression-tests - Run proof compression tests
+///   ./ZoltraakProver              - Run all tests
+///   ./ZoltraakProver benchmarks   - Run benchmarks
+///   ./ZoltraakProver quick       - Run quick tests (skip slow E2E)
+///   ./ZoltraakProver gpu         - Run GPU batch tests only
+///   ./ZoltraakProver e2e         - Run E2E tests only
+///   ./ZoltraakProver opcode      - Run opcode tests only
+///   ./ZoltraakProver phase-bench - Run Phase 2/3 integration benchmark
+///   ./ZoltraakProver comparison  - Run comparison benchmark
+///   ./ZoltraakProver unified    - Run unified block proof benchmark
+///   ./ZoltraakProver full-compare - Run full block comparison
+///   ./ZoltraakProver real-block [num] - Fetch and test real Ethereum block
+///   ./ZoltraakProver real-block-unified [num] - Fetch and test real block with unified proving
+///   ./ZoltraakProver real-block-unified [num] [compression] - compression: standard (32 cols), fast (16 cols)
+///   ./ZoltraakProver synthetic-block - Run synthetic block benchmark
+///   ./ZoltraakProver test <name> - Run specific test by name
+///   ./ZoltraakProver compression - Run proof compression benchmarks
+///   ./ZoltraakProver compression-compare - Compare baseline vs compressed
+///   ./ZoltraakProver compression-tests - Run proof compression tests
 
 let args = ProcessInfo.processInfo.arguments
 let mode = args.count > 1 ? args[1] : "tests"
 let testFilter = args.count > 2 ? args[2] : nil
+
+// Print header for interactive modes
+switch mode {
+case "eth-live", "eth-live-cont", "benchmarks", "quick", "gpu", "e2e", "opcode":
+    printZoltraakHeader()
+default:
+    break
+}
 
 switch mode {
 case "benchmarks":
