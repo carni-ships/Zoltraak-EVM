@@ -30,78 +30,70 @@ ${NC}"
 
 # Magic circle frames (8 frames for animation)
 MAGIC_CIRCLE_FRAMES=(
-"
-    ${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}
-    ${MAGENTA}   ╱                           ╲    ${NC}
-    ${MAGENTA}  ║    ╔═══╗   ╔═══╗   ╔═══╗    ║    ${NC}
-    ${MAGENTA}  ║   ╔╝ ◯ ╚╗ ╔╝ ◯ ╚╗ ╔╝ ◯ ╚╗   ║    ${NC}
-    ${MAGENTA}  ║   ╚╗   ╔╝ ╚╗   ╔╝ ╚╗   ╔╝   ║    ${NC}
-    ${MAGENTA}  ║    ╚═══╝   ╚═══╝   ╚═══╝    ║    ${NC}
-    ${MAGENTA}   ╲                           ╱    ${NC}
-    ${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}"
-"
-    ${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}
-    ${MAGENTA}   ╱                           ╲    ${NC}
-    ${MAGENTA}  ║    ╔═══╗   ╔═══╗   ╔═══╗    ║    ${NC}
-    ${MAGENTA}  ║   ╔╝ ● ╚╗ ╔╝ ● ╚╗ ╔╝ ● ╚╗   ║    ${NC}
-    ${MAGENTA}  ║   ╚╗   ╔╝ ╚╗   ╔╝ ╚╗   ╔╝   ║    ${NC}
-    ${MAGENTA}  ║    ╚═══╝   ╚═══╝   ╚═══╝    ║    ${NC}
-    ${MAGENTA}   ╲                           ╱    ${NC}
-    ${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}"
-"
-    ${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}
-    ${MAGENTA}   ╱                           ╲    ${NC}
-    ${MAGENTA}  ║    ╔═══╗   ╔═══╗   ╔═══╗    ║    ${NC}
-    ${MAGENTA}  ║   ╔╝ ◈ ╚╗ ╔╝ ◈ ╚╗ ╔╝ ◈ ╚╗   ║    ${NC}
-    ${MAGENTA}  ║   ╚╗   ╔╝ ╚╗   ╔╝ ╚╗   ╔╝   ║    ${NC}
-    ${MAGENTA}  ║    ╚═══╝   ╚═══╝   ╚═══╝    ║    ${NC}
-    ${MAGENTA}   ╲                           ╱    ${NC}
-    ${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}"
-"
-    ${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}
-    ${MAGENTA}   ╱                           ╲    ${NC}
-    ${MAGENTA}  ║    ╔═══╗   ╔═══╗   ╔═══╗    ║    ${NC}
-    ${MAGENTA}  ║   ╔╝ ◎ ╚╗ ╔╝ ◎ ╚╗ ╔╝ ◎ ╚╗   ║    ${NC}
-    ${MAGENTA}  ║   ╚╗   ╔╝ ╚╗   ╔╝ ╚╗   ╔╝   ║    ${NC}
-    ${MAGENTA}  ║    ╚═══╝   ╚═══╝   ╚═══╝    ║    ${NC}
-    ${MAGENTA}   ╲                           ╱    ${NC}
-    ${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}"
-"
-    ${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}
-    ${MAGENTA}   ╱                           ╲    ${NC}
-    ${MAGENTA}  ║    ╔═══╗   ╔═══╗   ╔═══╗    ║    ${NC}
-    ${MAGENTA}  ║   ╔╝ ◉ ╚╗ ╔╝ ◉ ╚╗ ╔╝ ◉ ╚╗   ║    ${NC}
-    ${MAGENTA}  ║   ╚╗   ╔╝ ╚╗   ╔╝ ╚╗   ╔╝   ║    ${NC}
-    ${MAGENTA}  ║    ╚═══╝   ╚═══╝   ╚═══╝    ║    ${NC}
-    ${MAGENTA}   ╲                           ╱    ${NC}
-    ${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}"
-"
-    ${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}
-    ${MAGENTA}   ╱                           ╲    ${NC}
-    ${MAGENTA}  ║    ╔═══╗   ╔═══╗   ╔═══╗    ║    ${NC}
-    ${MAGENTA}  ║   ╔╝ ◯ ╚╗ ╔╝ ◯ ╚╗ ╔╝ ◯ ╚╗   ║    ${NC}
-    ${MAGENTA}  ║   ╚╗   ╔╝ ╚╗   ╔╝ ╚╗   ╔╝   ║    ${NC}
-    ${MAGENTA}  ║    ╚═══╝   ╚═══╝   ╚═══╝    ║    ${NC}
-    ${MAGENTA}   ╲                           ╱    ${NC}
-    ${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}"
-"
-    ${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}
-    ${MAGENTA}   ╱                           ╲    ${NC}
-    ${MAGENTA}  ║    ╔═══╗   ╔═══╗   ╔═══╗    ║    ${NC}
-    ${MAGENTA}  ║   ╔╝ ● ╚╗ ╔╝ ● ╚╗ ╔╝ ● ╚╗   ║    ${NC}
-    ${MAGENTA}  ║   ╚╗   ╔╝ ╚╗   ╔╝ ╚╗   ╔╝   ║    ${NC}
-    ${MAGENTA}  ║    ╚═══╝   ╚═══╝   ╚═══╝    ║    ${NC}
-    ${MAGENTA}   ╲                           ╱    ${NC}
-    ${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}"
-"
-    ${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}
-    ${MAGENTA}   ╱                           ╲    ${NC}
-    ${MAGENTA}  ║    ╔═══╗   ╔═══╗   ╔═══╗    ║    ${NC}
-    ${MAGENTA}  ║   ╔╝ ◈ ╚╗ ╔╝ ◈ ╚╗ ╔╝ ◈ ╚╗   ║    ${NC}
-    ${MAGENTA}  ║   ╚╗   ╔╝ ╚╗   ╔╝ ╚╗   ╔╝   ║    ${NC}
-    ${MAGENTA}  ║    ╚═══╝   ╚═══╝   ╚═══╝    ║    ${NC}
-    ${MAGENTA}   ╲                           ╱    ${NC}
-    ${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}"
+"${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}
+${MAGENTA}   ╱                           ╲    ${NC}
+${MAGENTA}  ║    ╔═══╗   ╔═══╗   ╔═══╗    ║    ${NC}
+${MAGENTA}  ║   ╔╝ ◯ ╚╗ ╔╝ ◯ ╚╗ ╔╝ ◯ ╚╗   ║    ${NC}
+${MAGENTA}  ║   ╚╗   ╔╝ ╚╗   ╔╝ ╚╗   ╔╝   ║    ${NC}
+${MAGENTA}  ║    ╚═══╝   ╚═══╝   ╚═══╝    ║    ${NC}
+${MAGENTA}   ╲                           ╱    ${NC}
+${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}"
+"${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}
+${MAGENTA}   ╱                           ╲    ${NC}
+${MAGENTA}  ║    ╔═══╗   ╔═══╗   ╔═══╗    ║    ${NC}
+${MAGENTA}  ║   ╔╝ ● ╚╗ ╔╝ ● ╚╗ ╔╝ ● ╚╗   ║    ${NC}
+${MAGENTA}  ║   ╚╗   ╔╝ ╚╗   ╔╝ ╚╗   ╔╝   ║    ${NC}
+${MAGENTA}  ║    ╚═══╝   ╚═══╝   ╚═══╝    ║    ${NC}
+${MAGENTA}   ╲                           ╱    ${NC}
+${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}"
+"${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}
+${MAGENTA}   ╱                           ╲    ${NC}
+${MAGENTA}  ║    ╔═══╗   ╔═══╗   ╔═══╗    ║    ${NC}
+${MAGENTA}  ║   ╔╝ ◈ ╚╗ ╔╝ ◈ ╚╗ ╔╝ ◈ ╚╗   ║    ${NC}
+${MAGENTA}  ║   ╚╗   ╔╝ ╚╗   ╔╝ ╚╗   ╔╝   ║    ${NC}
+${MAGENTA}  ║    ╚═══╝   ╚═══╝   ╚═══╝    ║    ${NC}
+${MAGENTA}   ╲                           ╱    ${NC}
+${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}"
+"${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}
+${MAGENTA}   ╱                           ╲    ${NC}
+${MAGENTA}  ║    ╔═══╗   ╔═══╗   ╔═══╗    ║    ${NC}
+${MAGENTA}  ║   ╔╝ ◎ ╚╗ ╔╝ ◎ ╚╗ ╔╝ ◎ ╚╗   ║    ${NC}
+${MAGENTA}  ║   ╚╗   ╔╝ ╚╗   ╔╝ ╚╗   ╔╝   ║    ${NC}
+${MAGENTA}  ║    ╚═══╝   ╚═══╝   ╚═══╝    ║    ${NC}
+${MAGENTA}   ╲                           ╱    ${NC}
+${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}"
+"${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}
+${MAGENTA}   ╱                           ╲    ${NC}
+${MAGENTA}  ║    ╔═══╗   ╔═══╗   ╔═══╗    ║    ${NC}
+${MAGENTA}  ║   ╔╝ ◉ ╚╗ ╔╝ ◉ ╚╗ ╔╝ ◉ ╚╗   ║    ${NC}
+${MAGENTA}  ║   ╚╗   ╔╝ ╚╗   ╔╝ ╚╗   ╔╝   ║    ${NC}
+${MAGENTA}  ║    ╚═══╝   ╚═══╝   ╚═══╝    ║    ${NC}
+${MAGENTA}   ╲                           ╱    ${NC}
+${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}"
+"${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}
+${MAGENTA}   ╱                           ╲    ${NC}
+${MAGENTA}  ║    ╔═══╗   ╔═══╗   ╔═══╗    ║    ${NC}
+${MAGENTA}  ║   ╔╝ ◯ ╚╗ ╔╝ ◯ ╚╗ ╔╝ ◯ ╚╗   ║    ${NC}
+${MAGENTA}  ║   ╚╗   ╔╝ ╚╗   ╔╝ ╚╗   ╔╝   ║    ${NC}
+${MAGENTA}  ║    ╚═══╝   ╚═══╝   ╚═══╝    ║    ${NC}
+${MAGENTA}   ╲                           ╱    ${NC}
+${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}"
+"${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}
+${MAGENTA}   ╱                           ╲    ${NC}
+${MAGENTA}  ║    ╔═══╗   ╔═══╗   ╔═══╗    ║    ${NC}
+${MAGENTA}  ║   ╔╝ ● ╚╗ ╔╝ ● ╚╗ ╔╝ ● ╚╗   ║    ${NC}
+${MAGENTA}  ║   ╚╗   ╔╝ ╚╗   ╔╝ ╚╗   ╔╝   ║    ${NC}
+${MAGENTA}  ║    ╚═══╝   ╚═══╝   ╚═══╝    ║    ${NC}
+${MAGENTA}   ╲                           ╱    ${NC}
+${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}"
+"${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}
+${MAGENTA}   ╱                           ╲    ${NC}
+${MAGENTA}  ║    ╔═══╗   ╔═══╗   ╔═══╗    ║    ${NC}
+${MAGENTA}  ║   ╔╝ ◈ ╚╗ ╔╝ ◈ ╚╗ ╔╝ ◈ ╚╗   ║    ${NC}
+${MAGENTA}  ║   ╚╗   ╔╝ ╚╗   ╔╝ ╚╗   ╔╝   ║    ${NC}
+${MAGENTA}  ║    ╚═══╝   ╚═══╝   ╚═══╝    ║    ${NC}
+${MAGENTA}   ╲                           ╱    ${NC}
+${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}"
 )
 
 SPINNER_CHARS="/-\\|"
@@ -138,7 +130,10 @@ frame=0
 count=0
 while kill -0 $BUILD_PID 2>/dev/null; do
     spin=${SPINNER_CHARS:$count:1}
-    printf "\r  ${MAGENTA}%s${NC} %s" "$spin" "${MAGIC_CIRCLE_FRAMES[$frame]}"
+    # Clear screen and home cursor before each frame for smooth animation
+    # Using $'\033' syntax ensures proper escape sequence interpretation
+    printf $'\033[2J\033[H'
+    printf "  %s %s\n" "$spin" "${MAGIC_CIRCLE_FRAMES[$frame]}"
     frame=$(( (frame + 1) % 8 ))
     count=$(( (count + 1) % 4 ))
     sleep 0.12
