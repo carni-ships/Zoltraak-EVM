@@ -28,6 +28,15 @@ X       '8888k   ...ue888b   '888R     :888ooo  .d88B :@8c        u           u 
 - **Live Ethereum mode**: `./ZoltraakProver real-block-unified <block> standard` fetches and proves real mainnet blocks
 - **On-chain verification**: Solidity verifiers for BN254 pairing checks (~300k gas)
 
+## ⚠️ Disclaimer
+
+**This is experimental and unaudited software.** Do not use in production or for securing real value until thoroughly reviewed and audited by qualified security experts.
+
+- No guarantees are made about correctness, security, or fitness for any purpose
+- Proofs generated may be invalid or incomplete
+- Smart contract integrations have not been audited
+- Use at your own risk
+
 ## Quick Start
 
 ```bash
