@@ -18,14 +18,14 @@ X       '8888k   ...ue888b   '888R     :888ooo  .d88B :@8c        u           u 
  '"88...x8""
 ```
 
-**GPU-accelerated ZK proving for Ethereum blocks.** Generate STARK proofs for Ethereum transactions in ~10 seconds using Apple Silicon GPUs — fast enough to keep up with Ethereum's 12-second block time.
+**GPU-accelerated ZK proving for Ethereum blocks.** Generate STARK proofs for Ethereum transactions in ~7-9 seconds using Apple Silicon GPUs — fast enough to keep up with Ethereum's 12-second block time.
 
 ## Key Highlights
 
-- **Real-time proving**: ~10s/block on Apple Silicon M3 Max, verified in ~5ms
+- **Real-time proving**: ~7-9s/block on Apple Silicon M3 Max, verified in ~5ms
 - **Circle STARK**: Efficient proof system over the Mersenne-31 field with Poseidon2 hashing
 - **Unified block proofs**: Single proof for all transactions in a block (not one-per-tx)
-- **Live Ethereum mode**: `./ZoltraakRunner eth-live` fetches and proves real mainnet blocks
+- **Live Ethereum mode**: `./ZoltraakProver real-block-unified <block> standard` fetches and proves real mainnet blocks
 - **On-chain verification**: Solidity verifiers for BN254 pairing checks (~300k gas)
 
 ## Quick Start
