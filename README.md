@@ -32,8 +32,8 @@ X       '8888k   ...ue888b   '888R     :888ooo  .d88B :@8c        u           u 
 
 ```bash
 # Clone the repo
-git clone https://github.com/carbearnara/Zoltraak.git
-cd Zoltraak
+git clone https://github.com/carni-ships/Zoltraak-EVM.git
+cd Zoltraak-EVM
 
 # Initialize submodules (needed for foundry/zkMetal dependencies)
 git submodule update --init --recursive
@@ -42,8 +42,7 @@ git submodule update --init --recursive
 swift build
 
 # Run the binary
-./.build/release/ZoltraakRunner benchmarks
-./.build/release/ZoltraakRunner eth-live 1
+./.build/debug/ZoltraakProver real-block-unified <block_number> standard
 ```
 
 ## Architecture
@@ -52,7 +51,7 @@ swift build
 Ethereum Block → GPU EVM Interpreter → Circle STARK Proof → Verification
      ↓                 ↓                    ↓               ↓
    RPC Fetch      GPU Execution        M31 STARK      On-chain verifier
-                  (~100ms)           (~10s/block)       (~300k gas)
+                  (~80ms)            (~7-9s/block)      (~300k gas)
 ```
 
 ## Live Proving
@@ -61,13 +60,14 @@ Fetch blocks from Ethereum mainnet and generate STARK proofs in real-time:
 
 ```bash
 # Prove blocks against mainnet
-./ZoltraakRunner eth-live 3        # Prove 3 blocks
-./ZoltraakRunner eth-live-cont     # Continuous (until Ctrl+C)
+./ZoltraakProver real-block-unified <block_number> standard
+./ZoltraakProver real-block-unified <block_number> balanced
+./ZoltraakProver real-block-unified <block_number> ultra
 
 # Performance tracking
-# - Proving time: ~10-12s per block
-# - Verification: ~5ms per block
-# - Realtime rate: % of blocks proven within 12s window
+# - Standard: ~7-9s per block (full security)
+# - Balanced: ~4-6s per block (reduced security)
+# - Ultra: ~1-2s per block (minimal security)
 ```
 
 See [DOCUMENTATION/LiveEthereumProving.md](DOCUMENTATION/LiveEthereumProving.md) for full documentation.
@@ -104,20 +104,20 @@ The EVM trace uses **180 columns** to capture execution state:
 |--------|-------|
 | GPU Batch Merkle | 201x speedup vs CPU |
 | GPU Leaf Hash | 83x speedup |
-| GPU NTT/LDE | ~300ms for 180 columns |
 | GPU FRI | 22.8ms per fold |
-| GPU Constraint Eval | 714ms for 134 tx block |
-| Real blocks | ~10s/block (meets 12s target) |
+| Real blocks (standard) | ~7-9s/block |
+| Real blocks (balanced) | ~4-6s/block |
+| Real blocks (ultra) | ~1-2s/block |
 
-### Phase Breakdown (134 tx block)
+### Phase Breakdown (111 tx block, standard mode)
 
 | Phase | Time | % of Total |
 |-------|------|------------|
-| GPU EVM Execution | 63.6ms | 0.6% |
-| Trace building | 28.0ms | 0.3% |
-| CPU LDE (zero-padding) | 5,130ms | 50.2% |
-| GPU Merkle Commit | 4,840ms | 47.3% |
-| Constraint Evaluation | 136ms | 1.3% |
+| GPU Merkle Commit | 1,600ms | 19% |
+| GPU Tree Buffer Rebuild | 4,300ms | 52% |
+| GPU Constraint Eval | 1,400ms | 17% |
+| FRI | 94ms | 1% |
+| Query Responses | 5ms | <1% |
 
 ## Proving Pipeline
 
