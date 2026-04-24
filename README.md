@@ -151,6 +151,33 @@ All modes target >128 bits, exceeding Ethereum's standard.
 - **Security**: ~100-bit soundness (configurable)
 - **GPU**: Apple Silicon Metal for acceleration
 
+### Why M31 Circle STARK?
+
+Zoltraak uses Mersenne-31 (M31) as the base field for several key reasons:
+
+**1. GPU-Friendly Arithmetic**
+- M31 fits in 31 bits, naturally aligned to GPU registers
+- Field operations are SIMD-friendly (no carry chains like BN254)
+- Apple Silicon Metal supports fast M31 operations via SIMD intrinsics
+
+**2. Circle STARK Advantages**
+- No trusted setup required (unlike Groth16/Plonk)
+- Transparent verification - anyone can verify without parameters
+- Fast prover with O(n log n) complexity using FFT-friendly structure
+- Smaller proofs than Groth16 for equivalent security
+
+**3. Security Properties**
+- ~100-140 bit soundness (configurable)
+- Poseidon2 hash built specifically for M31 with excellent security margins
+- No known weaknesses against Apple Silicon GPU attacks
+
+**4. Tradeoff vs BN254**
+- BN254: Native EVM pairing support but expensive proving (~60s+ for EVM blocks)
+- M31 Circle STARK: Fast proving (~7s) but requires recursive aggregation for L1 verification
+- Solution: Prove in M31 (fast), aggregate to BN254 (cheap L1 verification)
+
+The Taiko-style architecture (M31 → Nova IVC → CycleFold → BN254) combines the best of both: fast GPU proving with cheap on-chain verification.
+
 ## Security Analysis
 
 Zoltraak targets **~134 bits of security**, slightly exceeding the industry standard of 128 bits.
