@@ -127,6 +127,13 @@ public func runLiveProvingMode(
         totalTxCount += blockData.txCount
 
         let proveStart = CFAbsoluteTimeGetCurrent()
+
+        // Suppress stdout during proving in quiet mode to avoid verbose logs
+        let originalStdout = FileHandle.standardOutput
+        if quiet {
+            freopen("/dev/null", "w", stdout)
+        }
+
         let animation = ProvingAnimation(message: "Proving block #\(blockNum)...")
         animation.start()
 
@@ -134,6 +141,12 @@ public func runLiveProvingMode(
             let evmTransactions = blockData.toEVMTransactions()
 
             let proof = try batchProver.proveBatch(transactions: evmTransactions, quiet: quiet)
+
+            // Restore stdout before printing results
+            if quiet {
+                fflush(stdout)
+                dup2(originalStdout.fileDescriptor, STDOUT_FILENO)
+            }
 
             animation.stop(success: true, finalMessage: "Block #\(blockNum) proved in \(String(format: "%.1f", (CFAbsoluteTimeGetCurrent() - proveStart) * 1000))ms")
 
@@ -212,6 +225,11 @@ public func runLiveProvingMode(
             }
 
         } catch {
+            // Restore stdout before printing error
+            if quiet {
+                fflush(stdout)
+                dup2(originalStdout.fileDescriptor, STDOUT_FILENO)
+            }
             animation.stop(success: false, finalMessage: "Block #\(blockNum) failed")
             let proveTimeMs = (CFAbsoluteTimeGetCurrent() - proveStart) * 1000
             print("  FAILED: \(error)")
@@ -339,12 +357,25 @@ public func runContinuousLiveProving(
         totalTxCount += blockData.txCount
 
         let proveStart = CFAbsoluteTimeGetCurrent()
+
+        // Suppress stdout during proving in quiet mode to avoid verbose logs
+        let originalStdout = FileHandle.standardOutput
+        if quiet {
+            freopen("/dev/null", "w", stdout)
+        }
+
         let animation = ProvingAnimation(message: "Proving block #\(nextBlockToProve)...")
         animation.start()
 
         do {
             let evmTransactions = blockData.toEVMTransactions()
             let proof = try batchProver.proveBatch(transactions: evmTransactions, quiet: quiet)
+
+            // Restore stdout before printing results
+            if quiet {
+                fflush(stdout)
+                dup2(originalStdout.fileDescriptor, STDOUT_FILENO)
+            }
 
             animation.stop(success: true, finalMessage: "Block #\(nextBlockToProve) verified")
 
@@ -402,6 +433,11 @@ public func runContinuousLiveProving(
             }
 
         } catch {
+            // Restore stdout before printing error
+            if quiet {
+                fflush(stdout)
+                dup2(originalStdout.fileDescriptor, STDOUT_FILENO)
+            }
             animation.stop(success: false, finalMessage: "Block #\(nextBlockToProve) failed")
             print("Block #\(nextBlockToProve): FAILED - \(error)")
             totalFailed += 1
