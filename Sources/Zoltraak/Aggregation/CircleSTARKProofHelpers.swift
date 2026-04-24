@@ -180,6 +180,7 @@ public enum CircleSTARKProofError: Error {
     case invalidMagic
     case unsupportedVersion(UInt32)
     case truncatedData
+    case insufficientData
     case invalidFormat(String)
 }
 
@@ -196,16 +197,27 @@ public enum CircleSTARKProofError: Error {
 /// - Metadata: traceLength, numColumns, logBlowup
 /// - Query responses: traceValues, tracePaths, compositionValue, compositionPath, quotientValues
 public func deserializeGPUProof(from data: Data) throws -> GPUCircleSTARKProverProof {
+    // Validate minimum data size before reading
+    guard data.count >= 4 else {
+        throw CircleSTARKProofError.insufficientData
+    }
+
     var offset = 0
 
-    func readBytes(_ count: Int) -> [UInt8] {
+    func readBytes(_ count: Int) throws -> [UInt8] {
+        guard offset + count <= data.count else {
+            throw CircleSTARKProofError.truncatedData
+        }
         let result = Array(data[offset..<offset+count])
         offset += count
         return result
     }
 
-    func readUInt32() -> UInt32 {
+    func readUInt32() throws -> UInt32 {
         // Manually extract bytes to avoid alignment issues
+        guard offset + 4 <= data.count else {
+            throw CircleSTARKProofError.truncatedData
+        }
         let b0 = UInt32(data[offset])
         let b1 = UInt32(data[offset + 1])
         let b2 = UInt32(data[offset + 2])
@@ -214,116 +226,116 @@ public func deserializeGPUProof(from data: Data) throws -> GPUCircleSTARKProverP
         return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
     }
 
-    func readM31Digest() -> M31Digest {
+    func readM31Digest() throws -> M31Digest {
         var values = [M31]()
         for _ in 0..<8 {
-            let bits = readUInt32()
+            let bits = try readUInt32()
             values.append(M31(v: bits))
         }
         return M31Digest(values: values)
     }
 
     // Read trace commitments
-    let numTraceCommitments = Int(readUInt32())
+    let numTraceCommitments = Int(try readUInt32())
     var traceCommitments = [M31Digest]()
     for _ in 0..<numTraceCommitments {
-        traceCommitments.append(readM31Digest())
+        traceCommitments.append(try readM31Digest())
     }
 
     // Read composition commitment
-    let compositionCommitment = readM31Digest()
+    let compositionCommitment = try readM31Digest()
 
     // Read quotient commitments
-    let numQuotient = Int(readUInt32())
+    let numQuotient = Int(try readUInt32())
     var quotientCommitments = [M31Digest]()
     for _ in 0..<numQuotient {
-        quotientCommitments.append(readM31Digest())
+        quotientCommitments.append(try readM31Digest())
     }
 
     // Read FRI proof
-    let numRounds = Int(readUInt32())
+    let numRounds = Int(try readUInt32())
     var friRounds = [GPUCircleFRIRound]()
     for _ in 0..<numRounds {
-        let commitment = readM31Digest()
-        let numQueries = Int(readUInt32())
+        let commitment = try readM31Digest()
+        let numQueries = Int(try readUInt32())
         var queryResponses = [(M31, M31, [M31Digest])]()
         for _ in 0..<numQueries {
-            let aBits = readUInt32()
-            let bBits = readUInt32()
+            let aBits = try readUInt32()
+            let bBits = try readUInt32()
             let a = M31(v: aBits)
             let b = M31(v: bBits)
-            let pathLen = Int(readUInt32())
+            let pathLen = Int(try readUInt32())
             var path = [M31Digest]()
             for _ in 0..<pathLen {
-                path.append(readM31Digest())
+                path.append(try readM31Digest())
             }
             queryResponses.append((a, b, path))
         }
         friRounds.append(GPUCircleFRIRound(commitment: commitment, queryResponses: queryResponses))
     }
 
-    let finalValueBits = readUInt32()
+    let finalValueBits = try readUInt32()
     let finalValue = M31(v: finalValueBits)
 
-    let numIndices = Int(readUInt32())
+    let numIndices = Int(try readUInt32())
     var queryIndices = [Int]()
     for _ in 0..<numIndices {
-        queryIndices.append(Int(readUInt32()))
+        queryIndices.append(Int(try readUInt32()))
     }
 
-    let alphaBits = readUInt32()
+    let alphaBits = try readUInt32()
     let alpha = M31(v: alphaBits)
 
     // Read metadata
-    let traceLength = Int(readUInt32())
-    let numColumns = Int(readUInt32())
-    let logBlowupByte = readBytes(1)
+    let traceLength = Int(try readUInt32())
+    let numColumns = Int(try readUInt32())
+    let logBlowupByte = try readBytes(1)
     let logBlowup = Int(logBlowupByte[0])
 
     // Read query responses
-    let numQueryResponses = Int(readUInt32())
+    let numQueryResponses = Int(try readUInt32())
     var queryResponses = [GPUCircleSTARKQueryResponse]()
 
     for _ in 0..<numQueryResponses {
         // Trace values
-        let numTrace = Int(readUInt32())
+        let numTrace = Int(try readUInt32())
         var traceValues = [M31]()
         for _ in 0..<numTrace {
-            let bits = readUInt32()
+            let bits = try readUInt32()
             traceValues.append(M31(v: bits))
         }
 
         // Trace paths
-        let numPaths = Int(readUInt32())
+        let numPaths = Int(try readUInt32())
         var tracePaths = [[M31Digest]]()
         for _ in 0..<numPaths {
-            let pathLen = Int(readUInt32())
+            let pathLen = Int(try readUInt32())
             var path = [M31Digest]()
             for _ in 0..<pathLen {
-                path.append(readM31Digest())
+                path.append(try readM31Digest())
             }
             tracePaths.append(path)
         }
 
         // Composition value and path
-        let compBits = readUInt32()
+        let compBits = try readUInt32()
         let compositionValue = M31(v: compBits)
-        let compPathLen = Int(readUInt32())
+        let compPathLen = Int(try readUInt32())
         var compositionPath = [M31Digest]()
         for _ in 0..<compPathLen {
-            compositionPath.append(readM31Digest())
+            compositionPath.append(try readM31Digest())
         }
 
         // Quotient split values
-        let numQuotients = Int(readUInt32())
+        let numQuotients = Int(try readUInt32())
         var quotientSplitValues = [M31]()
         for _ in 0..<numQuotients {
-            let bits = readUInt32()
+            let bits = try readUInt32()
             quotientSplitValues.append(M31(v: bits))
         }
 
         // Query index (stored last in serialization)
-        let queryIdx = Int(readUInt32())
+        let queryIdx = Int(try readUInt32())
 
         queryResponses.append(GPUCircleSTARKQueryResponse(
             traceValues: traceValues,

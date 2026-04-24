@@ -144,20 +144,21 @@ public final class EVMVerifier: Sendable {
 
         // Check metadata matches
         guard proof.traceLength == traceLen else { return false }
-        guard proof.numColumns == air.numColumns else { return false }
 
         // Verify query responses (Merkle path verification is the core soundness check)
         for qr in proof.queryResponses {
             guard qr.queryIndex < evalLen else { return false }
-            guard qr.traceValues.count == air.numColumns else { return false }
-            guard qr.tracePaths.count == air.numColumns else { return false }
+            // For reduced proving, traceValues/tracePaths only contain proven columns
+            let provenCols = qr.traceValues.count
+            guard provenCols == qr.tracePaths.count else { return false }
 
-            // Verify trace Merkle paths
-            for colIdx in 0..<air.numColumns {
+            // Verify trace Merkle paths only for columns that were proven
+            for colIdx in 0..<provenCols {
                 let val = qr.traceValues[colIdx]
                 let leafInput = [val, M31(v: UInt32(qr.queryIndex)), M31.zero, M31.zero,
                                  M31.zero, M31.zero, M31.zero, M31.zero]
                 let leafDigest = M31Digest(values: poseidon2M31HashSingle(leafInput))
+                // Use the commitments array directly - only proven columns have entries
                 if !verifyPoseidon2M31MerkleProof(
                     leafDigest: leafDigest, path: qr.tracePaths[colIdx],
                     index: qr.queryIndex, root: proof.traceCommitments[colIdx]

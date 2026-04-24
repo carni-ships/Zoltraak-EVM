@@ -417,8 +417,16 @@ public final class ZoltraakGPUProver {
 
         // Layout input buffer: [tree0_leaf0_0, ..., tree0_leaf0_7, tree0_leaf1_0, ..., tree1_leaf0_0, ...]
         let totalInputVals = numTrees * numLeaves * nodeSize
-        guard let inputBuf = device.makeBuffer(length: totalInputVals * stride, options: .storageModeShared) else {
-            throw GPUProverError.gpuError("Failed to allocate input buffer")
+        let totalBytes = totalInputVals * stride
+
+        // Guard against excessive allocation
+        let maxAllowedBytes = 500 * 1024 * 1024 // 500 MB sanity limit
+        guard totalBytes <= maxAllowedBytes else {
+            throw GPUProverError.gpuError("Excessive GPU buffer allocation: \(totalBytes) bytes (max: \(maxAllowedBytes))")
+        }
+
+        guard let inputBuf = device.makeBuffer(length: totalBytes, options: .storageModeShared) else {
+            throw GPUProverError.gpuError("Failed to allocate input buffer (\(totalBytes) bytes)")
         }
 
         // Copy all tree data to input buffer
@@ -426,7 +434,10 @@ public final class ZoltraakGPUProver {
         var inputIdx = 0
         for treeDigests in allColumnDigests {
             for val in treeDigests {
-                precondition(inputIdx < totalInputVals, "Input index out of bounds: \(inputIdx) >= \(totalInputVals)")
+                // Bounds check to prevent bus errors
+                if inputIdx >= totalInputVals {
+                    throw GPUProverError.gpuError("Input index out of bounds: \(inputIdx) >= \(totalInputVals)")
+                }
                 inputPtr[inputIdx] = val.v
                 inputIdx += 1
             }

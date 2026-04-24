@@ -209,6 +209,10 @@ public final class EVMBatchProver: Sendable {
     /// Sync wrapper for pipeline (for use from non-async contexts)
     private let pipelineCoordinator: EVMTxBlockProverPipeline
 
+    /// Cached block prover to avoid repeated GPU resource creation/destruction
+    private var cachedBlockProver: ZoltraakBlockProver?
+    private var cachedCompressionConfig: ProofCompressionConfig?
+
     public init(
         config: BatchProverConfig = .default,
         usePipeline: Bool = false,
@@ -224,19 +228,56 @@ public final class EVMBatchProver: Sendable {
         )
     }
 
+    /// Get or create a cached block prover to avoid GPU resource crashes
+    private func getOrCreateBlockProver() throws -> ZoltraakBlockProver {
+        // Check if we need to create a new one based on config
+        let compressionConfig = ProofCompressionConfig(
+            logTraceLength: config.logTraceLength,
+            logBlowup: config.logBlowup,
+            numQueries: config.numQueries,
+            provingColumnCount: config.provingColumnCount,
+            criticalColumnIndices: config.criticalColumnIndices,
+            enableTwoTierProving: false,
+            tier1NumQueries: 4,
+            tier2NumQueries: config.numQueries
+        )
+
+        if let cached = cachedBlockProver,
+           cachedCompressionConfig?.provingColumnCount == compressionConfig.provingColumnCount {
+            return cached
+        }
+
+        let blockProverConfig = BlockProvingConfig(
+            numQueries: config.numQueries,
+            logBlowup: config.logBlowup,
+            logTraceLength: config.logTraceLength,
+            useGPU: config.useGPU,
+            maxTransactionsPerBlock: 500,  // Handle large blocks (Ethereum can have 300-400+ tx)
+            enableInterTxConstraints: true,
+            gpuBatchSize: 512
+        )
+
+        let blockProver = try ZoltraakBlockProver(config: blockProverConfig, compressionConfig: compressionConfig)
+        cachedBlockProver = blockProver
+        cachedCompressionConfig = compressionConfig
+        return blockProver
+    }
+
     // MARK: - Batch Proving
 
     /// Prove multiple transactions in parallel
     public func proveBatch(
         transactions: [EVMTransaction],
-        initialStateRoot: M31Word = .zero
+        initialStateRoot: M31Word = .zero,
+        quiet: Bool = false
     ) throws -> EVMBatchProof {
         // Use unified block proof (Phase 3) if configured
         if config.useUnifiedProof {
             return try proveBlockUnified(
                 transactions: transactions,
                 blockContext: BlockContext(),
-                initialStateRoot: initialStateRoot
+                initialStateRoot: initialStateRoot,
+                quiet: quiet
             )
         }
 
@@ -250,7 +291,6 @@ public final class EVMBatchProver: Sendable {
             do {
                 return try proveBatchWithPipeline(transactions: transactions)
             } catch {
-                print("[BatchProver] Pipeline failed (\(error)), falling back to standard proving")
                 // Fall through to standard proving
             }
         }
@@ -276,15 +316,12 @@ public final class EVMBatchProver: Sendable {
     private func proveBatchNonUnified(transactions: [EVMTransaction]) throws -> EVMBatchProof {
         let startTime = CFAbsoluteTimeGetCurrent()
 
-        print("[BatchProver Non-Unified] Starting GPU multi-stream proving for \(transactions.count) transactions")
-
         // Initialize multi-stream GPU prover
         let multiStreamConfig = GPUProverMultiStream.Config.performance
         let multiStreamProver: GPUProverMultiStream
         do {
             multiStreamProver = try GPUProverMultiStream(config: multiStreamConfig)
         } catch {
-            print("[BatchProver Non-Unified] GPU multi-stream init failed: \(error), falling back to GPU batch")
             return try proveBatchGPU(transactions: transactions)
         }
 
@@ -321,10 +358,8 @@ public final class EVMBatchProver: Sendable {
             }
 
             provingTimeMs = result.totalTimeMs
-            print("[BatchProver Non-Unified] Multi-stream batch completed: \(result.successfulCount)/\(result.results.count) successful")
 
         } catch {
-            print("[BatchProver Non-Unified] Multi-stream batch failed: \(error), falling back to GPU sequential")
             return try proveBatchGPU(transactions: transactions)
         }
 
@@ -384,19 +419,11 @@ public final class EVMBatchProver: Sendable {
                 transactionProofs.append(circleProof)
 
             } catch {
-                print("[BatchProver Non-Unified] Warning: failed to prove transaction \(i): \(error)")
-                // Continue with remaining transactions
+                // Skip failed transaction
             }
         }
 
         let totalTimeMs = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
-
-        print("""
-        [BatchProver Non-Unified] Completed:
-          - Transactions proven: \(transactionProofs.count)/\(transactions.count)
-          - Total time: \(String(format: "%.1f", totalTimeMs))ms
-          - Per-transaction: \(String(format: "%.2f", totalTimeMs / Double(max(transactionProofs.count, 1))))ms
-        """)
 
         return EVMBatchProof(
             transactionProofs: transactionProofs,
@@ -458,70 +485,34 @@ public final class EVMBatchProver: Sendable {
     public func proveBlockUnified(
         transactions: [EVMTransaction],
         blockContext: BlockContext = BlockContext(),
-        initialStateRoot: M31Word = .zero
+        initialStateRoot: M31Word = .zero,
+        quiet: Bool = false
     ) throws -> EVMBatchProof {
         let startTime = CFAbsoluteTimeGetCurrent()
 
-        // Build compression config from batch config
-        let compressionConfig = ProofCompressionConfig(
-            logTraceLength: config.logTraceLength,
-            logBlowup: config.logBlowup,
-            numQueries: config.numQueries,
-            provingColumnCount: config.provingColumnCount,
-            criticalColumnIndices: config.criticalColumnIndices,
-            enableTwoTierProving: false,
-            tier1NumQueries: 4,
-            tier2NumQueries: config.numQueries
-        )
-
-        // Initialize the block prover with compression config
-        let blockProverConfig = BlockProvingConfig(
-            numQueries: config.numQueries,
-            logBlowup: config.logBlowup,
-            logTraceLength: config.logTraceLength,
-            useGPU: config.useGPU,
-            maxTransactionsPerBlock: max(150, transactions.count),
-            enableInterTxConstraints: true,
-            gpuBatchSize: 512
-        )
-
-        let blockProver: ZoltraakBlockProver
-        do {
-            blockProver = try ZoltraakBlockProver(config: blockProverConfig, compressionConfig: compressionConfig)
-        } catch {
-            throw BatchProverError.blockProverInitFailed(error)
-        }
+        // Get cached block prover to avoid repeated GPU resource creation/destruction
+        let blockProver = try getOrCreateBlockProver()
 
         // Run the async block prover synchronously using a semaphore
         let semaphore = DispatchSemaphore(value: 0)
         var asyncError: Error?
         var blockProofResult: BlockProof?
 
-        print("[BatchProver] About to create Task for block prover...")
-        fflush(stdout)
         Task {
             do {
-                print("[BatchProver] Task started, calling blockProver.prove()...")
-                fflush(stdout)
                 let result = try await blockProver.prove(
                     transactions: transactions,
                     blockContext: blockContext,
                     initialStateRoot: initialStateRoot
                 )
-                print("[BatchProver] Block prover completed successfully")
                 blockProofResult = result
             } catch {
-                print("[BatchProver] Block prover failed with error: \(error)")
                 asyncError = error
             }
-            print("[BatchProver] Signaling semaphore")
-            fflush(stdout)
             semaphore.signal()
         }
 
         // Wait for completion with timeout (10 minutes for large blocks)
-        print("[BatchProver] Waiting for block proof (timeout: 600s)...")
-        fflush(stdout)
         let waitResult = semaphore.wait(timeout: .now() + 600)
         if waitResult == .timedOut {
             throw BatchProverError.provingTimeout
@@ -543,14 +534,10 @@ public final class EVMBatchProver: Sendable {
         // Estimate sequential time for comparison (1750ms per tx baseline)
         let sequentialEstimateMs = Double(transactions.count) * 1750.0
 
-        print("""
-        [BatchProver] Unified block proof completed:
-          - Transactions: \(blockProof.transactionCount)
-          - Total time: \(String(format: "%.1f", totalTimeMs))ms
-          - Per-transaction: \(String(format: "%.2f", totalTimeMs / Double(max(blockProof.transactionCount, 1))))ms
-          - Sequential estimate: \(String(format: "%.1f", sequentialEstimateMs))ms
-          - Speedup: \(String(format: "%.1fx", sequentialEstimateMs / totalTimeMs))
-        """)
+        // Print summary (skip in quiet mode)
+        if !quiet {
+            print("[BatchProver] Unified block proof completed: Transactions: \(blockProof.transactionCount), Total time: \(String(format: "%.1f", totalTimeMs))ms, Per-tx: \(String(format: "%.2f", totalTimeMs / Double(max(blockProof.transactionCount, 1))))ms, Speedup: \(String(format: "%.1fx", sequentialEstimateMs / totalTimeMs))")
+        }
 
         // Convert BlockProof to EVMBatchProof for API compatibility
         // The starkProof contains the unified proof data
@@ -558,14 +545,17 @@ public final class EVMBatchProver: Sendable {
 
         // Create trace commitments from M31Digest values
         // Each commitment is 8 M31 values (32 bytes)
+        // M31 stores a 31-bit field element - need full 4 bytes per element
         let traceCommitments: [[UInt8]] = blockProof.commitments.map { commitment in
             var bytes: [UInt8] = []
             bytes.reserveCapacity(32)
             for val in commitment.values {
-                bytes.append(UInt8(truncatingIfNeeded: val.v))
-                bytes.append(UInt8(truncatingIfNeeded: val.v >> 8))
-                bytes.append(UInt8(truncatingIfNeeded: val.v >> 16))
-                bytes.append(UInt8(truncatingIfNeeded: val.v >> 24))
+                // Get low 31 bits of M31 value as UInt32, then extract bytes
+                let bits = UInt32(val.v & 0x7FFFFFFF)
+                bytes.append(UInt8(truncatingIfNeeded: bits))
+                bytes.append(UInt8(truncatingIfNeeded: bits >> 8))
+                bytes.append(UInt8(truncatingIfNeeded: bits >> 16))
+                bytes.append(UInt8(truncatingIfNeeded: bits >> 24))
             }
             return bytes
         }
@@ -614,8 +604,6 @@ public final class EVMBatchProver: Sendable {
         initialStateRoot: M31Word = .zero
     ) async throws -> UnifiedBlockProofResult {
         let startTime = CFAbsoluteTimeGetCurrent()
-
-        print("[BatchProver] Starting async unified block proof for \(transactions.count) transactions")
 
         let blockProverConfig = BlockProvingConfig(
             numQueries: config.numQueries,
@@ -695,31 +683,16 @@ public final class EVMBatchProver: Sendable {
         let successfulItems = result.items.filter { $0.succeeded }
         let failedCount = result.failedCount
 
-        print("""
-        [BatchProver Pipeline] Completed:
-          - Total time: \(String(format: "%.1f", totalTimeMs))ms
-          - Execution: \(String(format: "%.1f", result.executionTimeMs))ms
-          - Proving: \(String(format: "%.1f", result.provingTimeMs))ms
-          - Pipeline efficiency: \(String(format: "%.1f%%", result.pipelineEfficiency * 100))
-          - Throughput: \(String(format: "%.1f", result.throughput)) txn/s
-          - Successful: \(successfulItems.count)
-          - Failed: \(failedCount)
-          - Skipped (early rejection): \(result.skippedCount)
-        """)
-
         // Build transaction proofs from pipeline results
-        // Each successful item has an execution result that can be converted to a proof
         var transactionProofs: [CircleSTARKProof] = []
         for item in successfulItems {
             if let execution = item.executionResult {
-                // Create AIR from execution result
                 let air = EVMAIR.fromExecution(execution)
-                // Generate proof using the circle prover
                 do {
                     let proof = try circleProver.proveCPU(air: air)
                     transactionProofs.append(proof)
                 } catch {
-                    print("[BatchProver] Warning: failed to generate proof for item \(item.id): \(error)")
+                    // Skip failed proof generation
                 }
             }
         }
@@ -739,16 +712,12 @@ public final class EVMBatchProver: Sendable {
     private func proveBatchGPU(transactions: [EVMTransaction]) throws -> EVMBatchProof {
         let t0 = CFAbsoluteTimeGetCurrent()
 
-        print("    [Batch GPU] Creating EVMGPUBatchProver...")
         // Use EVMGPUBatchProver for GPU-accelerated proving
         let gpuConfig = EVMGPUBatchProver.Config(
             logBlowup: config.logBlowup,
             numQueries: config.numQueries
         )
-        print("    [Batch GPU] Config: logBlowup=\(config.logBlowup), numQueries=\(config.numQueries)")
-        print("    [Batch GPU] Initializing prover...")
         let gpuProver = try EVMGPUBatchProver(config: gpuConfig)
-        print("    [Batch GPU] Prover initialized, processing \(transactions.count) transactions...")
 
         // Execute transactions and generate proofs
         var results: [EVMGPUBatchProver.ProverResult] = []
@@ -756,8 +725,7 @@ public final class EVMBatchProver: Sendable {
         var totalCommit: Double = 0
         var totalTrace: Double = 0
 
-        for (i, tx) in transactions.enumerated() {
-            print("    [Batch GPU] Processing transaction \(i+1)/\(transactions.count)...")
+        for tx in transactions {
             let result = try gpuProver.prove(transaction: tx)
             results.append(result)
             totalLDE += result.ldeMs
