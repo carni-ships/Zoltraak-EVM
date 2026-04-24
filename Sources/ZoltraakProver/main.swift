@@ -11,9 +11,9 @@ import Zoltraak
 ///   ./ZoltraakProver e2e         - Run E2E tests only
 ///   ./ZoltraakProver opcode       - Run opcode tests only
 ///   ./ZoltraakProver eth-live [n] - Prove n blocks from live Ethereum
-///   ./ZoltraakProver eth-live-cont [limit] - Continuous proving (default)
+///   ./ZoltraakProver eth-live-cont [limit] - Continuous proving (default, uses ultraFast)
 ///     - -q/--quiet for summary-only output
-///   ./ZoltraakProver real-block-unified [num] [compression] - compression: standard (32 cols), balanced (24 cols), fast (16 cols)
+///   ./ZoltraakProver real-block-unified [num] [compression] - compression: standard (32 cols), balanced (24 cols), ultra (16 cols)
 ///   ./ZoltraakProver synthetic-block - Run synthetic block benchmark
 ///   ./ZoltraakProver test <name> - Run specific test by name
 

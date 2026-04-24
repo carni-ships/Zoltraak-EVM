@@ -48,11 +48,35 @@ Fetch and prove a single block with unified block proving.
 
 **Output Example:**
 ```
-Block #0x1180398 - 111 transactions:
-   Total time: 6614.5ms (6.61s)
-   Per-transaction: 59.6ms
-   Throughput: 16.8 tx/s
+[BatchProver] Unified block proof completed: Transactions: 256, Total time: 1322.1ms, Per-tx: 5.16ms, Speedup: 338.9x
+Block #24952737: STARK 1/1 | prove 1322.1ms | 0.0% realtime | 193.6 tx/s
 ```
+
+## Quiet Mode
+
+Use `-q` or `--quiet` flag to reduce output:
+
+```bash
+./ZoltraakProver eth-live-cont -q 10  # Prove 10 blocks quietly
+./ZoltraakProver real-block-unified -q 18351000 standard  # Prove single block quietly
+```
+
+Quiet mode output shows only essential per-block status:
+```
+#24952737: 1/1 STARK | 1322.1ms | 0.0% realtime | 193.6 tx/s
+```
+
+### `eth-live-cont [block_limit]`
+
+Continuous live proving mode - fetches and proves blocks sequentially as they appear on mainnet.
+
+```bash
+./ZoltraakProver eth-live-cont            # Unlimited continuous proving
+./ZoltraakProver eth-live-cont 100        # Prove 100 blocks then exit
+./ZoltraakProver eth-live-cont -q 50      # Quiet mode, prove 50 blocks
+```
+
+Uses `ultraFast` compression (16 columns) for realtime performance.
 
 ### State Witness Mode
 

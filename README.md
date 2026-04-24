@@ -59,16 +59,21 @@ Ethereum Block → GPU EVM Interpreter → Circle STARK Proof → Verification
 Fetch blocks from Ethereum mainnet and generate STARK proofs in real-time:
 
 ```bash
-# Prove blocks against mainnet
+# Default: continuous proving (eth-live-cont), uses ultraFast mode
+./ZoltraakProver eth-live-cont            # Unlimited, ultraFast (~1-2s/block)
+./ZoltraakProver eth-live-cont 100        # Prove 100 blocks then exit
+./ZoltraakProver eth-live-cont -q 50      # Quiet mode, prove 50 blocks
+
+# Single block proving with different compression modes
 ./ZoltraakProver real-block-unified <block_number> standard  # 32 columns, ~7-9s (recommended)
 ./ZoltraakProver real-block-unified <block_number> balanced  # 24 columns, ~4-6s
 ./ZoltraakProver real-block-unified <block_number> ultra    # 16 columns, ~1-2s
 ./ZoltraakProver real-block-unified <block_number> full     # 180 columns, ~18s, max security
 
-# Performance tracking
-# - Standard: ~7-9s per block (full security)
-# - Balanced: ~4-6s per block (reduced security)
-# - Ultra: ~1-2s per block (minimal security)
+# Performance
+# - Standard: ~7-9s per block (full security, 134 bits)
+# - Balanced: ~4-6s per block (reduced security, 132 bits)
+# - Ultra: ~1-2s per block (minimal security, 130 bits)
 ```
 
 See [DOCUMENTATION/LiveEthereumProving.md](DOCUMENTATION/LiveEthereumProving.md) for full documentation.
@@ -123,15 +128,17 @@ The EVM trace uses **180 columns** to capture execution state:
 
 All modes target >128 bits, exceeding Ethereum's standard.
 
-### Phase Breakdown (111 tx block, standard mode)
+### Phase Breakdown (256 tx block, ultraFast mode)
 
 | Phase | Time | % of Total |
 |-------|------|------------|
-| GPU Merkle Commit | 1,600ms | 19% |
-| GPU Tree Buffer Rebuild | 4,300ms | 52% |
-| GPU Constraint Eval | 1,400ms | 17% |
-| FRI | 94ms | 1% |
-| Query Responses | 5ms | <1% |
+| GPU Execution | 134ms | 10% |
+| Tree Building | 26ms | 2% |
+| LDE | 44ms | 3% |
+| GPU Merkle Commit | 563ms | 43% |
+| Constraint Eval | 38ms | 3% |
+| FRI | 510ms | 39% |
+| **Total** | **1,322ms** | 100% |
 
 ## Proving Pipeline
 
