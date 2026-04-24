@@ -111,10 +111,12 @@ The EVM trace uses **180 columns** to capture execution state:
 
 | Mode | Columns | Time | Security | Use Case |
 |------|---------|------|----------|----------|
-| **Ultra** | 16 | ~1-2s | ~20-30 bits | Testing/dev only |
-| **Balanced** | 24 | ~4-6s | ~40 bits | Fast production |
-| **Standard** | 32 | ~7-9s | ~60 bits | Recommended production |
-| **Full** | 180 | ~18s | ~100+ bits | Maximum security |
+| **Ultra** | 16 | ~1-2s | Reduced | Testing/dev only |
+| **Balanced** | 24 | ~4-6s | Moderate | Fast production |
+| **Standard** | 32 | ~7-9s | High | Recommended production |
+| **Full** | 180 | ~18s | ~134 bits | Maximum security |
+
+**Note:** Security scales with column count. Full mode targets ~134 bits matching Ethereum's ~128-bit standard. Reduced column modes trade security for speed. Actual security depends on FRI configuration (logBlowup, numQueries, degree).
 
 ### Phase Breakdown (111 tx block, standard mode)
 
@@ -162,7 +164,7 @@ Zoltraak targets **~134 bits of security**, slightly exceeding the industry stan
 - Exceeds the ~128-bit standard used by most production ZK systems
 - Margin above standard allows for configuration flexibility
 
-**Note:** Actual security depends on FRI configuration. Full 180-column proving provides maximum security. Column subset proving (32 columns) trades some security for speed.
+**Note:** Actual security depends on FRI configuration. Full 180-column proving targets ~134 bits. Column subset modes (standard, balanced, ultra) trade security for speed - use based on your security requirements.
 
 ## Documentation
 
