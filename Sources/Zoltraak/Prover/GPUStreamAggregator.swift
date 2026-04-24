@@ -159,7 +159,8 @@ public final class GPUStreamAggregator: Sendable {
         self.config = config
 
         // Build EVM CCS for aggregation
-        self.ccs = EVMHyperNovaAggregator.buildEVMCSS()
+        let ccs = try EVMHyperNovaAggregator.buildEVMCSS()
+        self.ccs = ccs
 
         // Initialize HyperNova prover with GPU MSM if available
         let msmEngine = try? MetalMSM()

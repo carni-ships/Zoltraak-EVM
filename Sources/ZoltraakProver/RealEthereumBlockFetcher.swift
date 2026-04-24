@@ -31,6 +31,16 @@ public struct RealEthereumBlockFetcher {
             timeout: 60
         )
 
+        public static let blockpi = RPCConfig(
+            url: "https://rpc.blockpi.io/eth",
+            timeout: 60
+        )
+
+        public static let ankrr = RPCConfig(
+            url: "https://rpc.ankr.com/eth",
+            timeout: 60
+        )
+
         // Default to publicNode (most reliable)
         public static let `default` = publicNode
 
@@ -38,6 +48,16 @@ public struct RealEthereumBlockFetcher {
         public static let cloudflare = publicNode
         public static let infura = publicNode
         public static let alchemy = publicNode
+
+        /// All available RPC endpoints for fallback rotation
+        public static let allEndpoints: [RPCConfig] = [
+            .publicNode,
+            .llamaNodes,
+            .oneRPC,
+            .omniatech,
+            .blockpi,
+            .ankrr
+        ]
     }
 
     /// Fetch a recent block from Ethereum mainnet
@@ -66,6 +86,47 @@ public struct RealEthereumBlockFetcher {
         let response = try sendRPCRequest(request: request, config: config)
         print("  Response received: \(response.prefix(200))...")
         return try parseBlockResponse(response)
+    }
+
+    /// Fetch block with automatic RPC fallback rotation.
+    /// Tries each endpoint in order until one succeeds or all fail.
+    public static func fetchBlockWithFallback(number: String) throws -> EthereumBlock {
+        var lastError: Error?
+
+        for (index, config) in RPCConfig.allEndpoints.enumerated() {
+            do {
+                if index > 0 {
+                    print("  Trying alternative RPC (\(index + 1)/\(RPCConfig.allEndpoints.count)): \(config.url)")
+                }
+                return try fetchBlock(number: number, config: config)
+            } catch {
+                lastError = error
+                print("  Failed: \(error.localizedDescription)")
+                continue
+            }
+        }
+
+        throw lastError ?? BlockFetcherError.noData
+    }
+
+    /// Fetch latest block with automatic RPC fallback rotation.
+    public static func fetchLatestBlockWithFallback() throws -> EthereumBlock {
+        var lastError: Error?
+
+        for (index, config) in RPCConfig.allEndpoints.enumerated() {
+            do {
+                if index > 0 {
+                    print("  Trying alternative RPC (\(index + 1)/\(RPCConfig.allEndpoints.count)): \(config.url)")
+                }
+                return try fetchLatestBlock(config: config)
+            } catch {
+                lastError = error
+                print("  Failed: \(error.localizedDescription)")
+                continue
+            }
+        }
+
+        throw lastError ?? BlockFetcherError.noData
     }
 
     /// Send RPC request to Ethereum node

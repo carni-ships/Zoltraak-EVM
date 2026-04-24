@@ -443,13 +443,18 @@ public struct ProverTests {
         // Step 4: Generate GPU proof with fallback to CPU
         print("  Attempting GPU prover with compression...\n")
 
-        // Use compression config for optimized proving
-        // This reduces logBlowup from 4 to 2 (4x fewer leaves) and proves only 32 columns
-        let compressionConfig = ProofCompressionConfig.standard
+        // Use CLI standard mode parameters: logBlowup=1, numQueries=4, provingCols=32
+        // This matches the "real-block-unified <block> standard" CLI mode
+        let compressionConfig = ProofCompressionConfig(
+            logTraceLength: 8,
+            logBlowup: 1,          // CLI standard mode
+            numQueries: 4,           // CLI standard mode
+            provingColumnCount: 32  // 32 columns (same as CLI standard)
+        )
 
         // Try GPU prover first with compression
         let gpuProverConfig = GPUCircleSTARKProverConfig(
-            logBlowup: compressionConfig.logBlowup,  // 2 instead of 4 = 4x fewer leaves
+            logBlowup: compressionConfig.logBlowup,
             numQueries: compressionConfig.numQueries,
             extensionDegree: 4,
             gpuConstraintThreshold: 1,

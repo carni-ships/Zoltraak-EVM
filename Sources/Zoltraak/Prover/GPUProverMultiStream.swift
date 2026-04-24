@@ -140,6 +140,12 @@ public final class GPUProverMultiStream: Sendable {
 
     public var metrics: ProvingMetrics = ProvingMetrics()
 
+    /// Serial dispatch queue to prevent GPU resource contention
+    private let gpuSerialQueue = DispatchQueue(label: "com.zoltraak.gpuserial", qos: .userInitiated)
+
+    /// Shared GPU prover to avoid concurrent GPU access issues
+    private var sharedGPUProver: ZoltraakGPUProver?
+
     // MARK: - Initialization
 
     /// Initialize multi-stream prover with configuration
@@ -159,13 +165,12 @@ public final class GPUProverMultiStream: Sendable {
         // Create prover contexts for each stream
         self.streamProvers = (0..<config.numStreams).map { StreamProverContext(streamIndex: $0) }
 
-        // Initialize aggregation engine
-        let ccs = EVMHyperNovaAggregator.buildEVMCSS()
-        self.aggregator = try? EVMHyperNovaAggregator(ccs: ccs, gpuEnabled: true)
+        // Initialize shared GPU prover for commit operations
+        self.sharedGPUProver = ZoltraakGPUProver()
 
-        print("GPUProverMultiStream: Initialized with \(config.numStreams) streams")
-        print("  - Aggregation batch size: \(config.aggregationBatchSize)")
-        print("  - Stream-aware dispatch: \(config.enableStreamAwareDispatch)")
+        // Initialize aggregation engine
+        let ccs = try EVMHyperNovaAggregator.buildEVMCSS()
+        self.aggregator = try? EVMHyperNovaAggregator(ccs: ccs, gpuEnabled: true)
     }
 
     // MARK: - Single Transaction Proving (Stream-Based)
@@ -286,24 +291,54 @@ public final class GPUProverMultiStream: Sendable {
             forStreams: streamAssignments.map { $0.streamIndex }
         )
 
+        // Pre-generate traces for all transactions (CPU-bound, can be parallel)
+        var traces: [(air: EVMAIR, trace: [[M31]])] = []
+        for tx in transactions {
+            let air = EVMAIR(logTraceLength: 12)
+            let trace = air.generateTrace()
+            traces.append((air, trace))
+        }
+
         // Execute proving for all transactions concurrently
         return try await withThrowingTaskGroup(of: StreamProofResult.self) { group in
-            for (idx, (tx, streamIdx)) in streamAssignments.enumerated() {
+            for (idx, ((tx, streamIdx), traceData)) in zip(streamAssignments, traces).enumerated() {
                 guard let cmdBuf = cmdBufs[idx] else { continue }
 
                 group.addTask {
                     let startTime = CFAbsoluteTimeGetCurrent()
-                    let (proof, commitments) = try await self.executeStreamProving(
-                        transaction: tx,
-                        streamIndex: streamIdx,
-                        cmdBuf: cmdBuf
-                    )
+                    let (air, trace) = traceData
+
+                    // Phase 2: LDE (CPU-bound)
+                    let traceLDEs = self.performLDE(trace: trace, logBlowup: 4, cmdBuf: cmdBuf, streamIndex: streamIdx)
+
+                    // Phase 3: Commit (GPU-bound - serialize to avoid contention)
+                    let commitResult = try await self.gpuSerialQueue.asyncExecute {
+                        guard let gpuProver = self.sharedGPUProver else {
+                            throw GPUStreamError.proofGenerationFailed("No shared GPU prover")
+                        }
+                        return try gpuProver.commitTraceColumnsGPU(traceLDEs: traceLDEs, evalLen: traceLDEs.first?.count ?? 4096)
+                    }
+
+                    // Phase 4: Constraint evaluation (GPU-bound - serialize)
+                    let constraintResult = try await self.gpuSerialQueue.asyncExecute {
+                        if self.streamProvers[streamIdx].constraintEngine == nil {
+                            self.streamProvers[streamIdx].constraintEngine = try EVMGPUConstraintEngine(logTraceLength: 12)
+                        }
+                        guard let engine = self.streamProvers[streamIdx].constraintEngine else {
+                            throw GPUStreamError.proofGenerationFailed("No constraint engine")
+                        }
+                        return try engine.evaluateConstraints(trace: traceLDEs, challenges: [], mode: .batch)
+                    }
+
+                    // Phase 5: FRI (CPU-bound)
+                    let proof = self.generateSTARKProof(trace: traceLDEs, commitments: commitResult.commitments, constraints: constraintResult.constraints, cmdBuf: cmdBuf, streamIndex: streamIdx)
                     let provingTimeMs = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
+
                     return StreamProofResult(
                         streamIndex: streamIdx,
                         transactionHash: tx.txHash,
                         proof: proof,
-                        commitments: commitments,
+                        commitments: commitResult.commitments,
                         provingTimeMs: provingTimeMs,
                         error: nil
                     )
@@ -343,14 +378,24 @@ public final class GPUProverMultiStream: Sendable {
         let commitResult = try gpuProver.commitTraceColumnsGPU(traceLDEs: traceLDEs, evalLen: traceLDEs.first?.count ?? 4096)
         let commitTimeMs = (CFAbsoluteTimeGetCurrent() - commitStart) * 1000
 
-        // Phase 4: Constraint evaluation
+        // Phase 4: Constraint evaluation (reuse stream's constraint engine)
         let constraintStart = CFAbsoluteTimeGetCurrent()
-        let constraintEngine = try EVMGPUConstraintEngine(logTraceLength: 12)
-        let constraintResult = try constraintEngine.evaluateConstraints(
-            trace: traceLDEs,
-            challenges: [],
-            mode: .batch
-        )
+        var constraintResult: EVMGPUConstraintEngine.EvaluationResult
+
+        // Lazy init constraint engine for this stream
+        if streamProvers[streamIndex].constraintEngine == nil {
+            streamProvers[streamIndex].constraintEngine = try EVMGPUConstraintEngine(logTraceLength: 12)
+        }
+
+        if let engine = streamProvers[streamIndex].constraintEngine {
+            constraintResult = try engine.evaluateConstraints(
+                trace: traceLDEs,
+                challenges: [],
+                mode: .batch
+            )
+        } else {
+            throw GPUStreamError.proofGenerationFailed("No constraint engine available")
+        }
         let constraintTimeMs = (CFAbsoluteTimeGetCurrent() - constraintStart) * 1000
 
         // Phase 5: FRI (simplified for now)
@@ -365,12 +410,6 @@ public final class GPUProverMultiStream: Sendable {
         let friTimeMs = (CFAbsoluteTimeGetCurrent() - friStart) * 1000
 
         let totalTimeMs = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
-
-        print("Stream \(streamIndex): TX \(transaction.txHash.prefix(8)) proved in \(String(format: "%.1fms", totalTimeMs))")
-        print("  - LDE: \(String(format: "%.1fms", ldeTimeMs))")
-        print("  - Commit: \(String(format: "%.1fms", commitTimeMs))")
-        print("  - Constraint: \(String(format: "%.1fms", constraintTimeMs))")
-        print("  - FRI: \(String(format: "%.1fms", friTimeMs))")
 
         return (proof, commitResult.commitments)
     }
@@ -566,6 +605,24 @@ public final class GPUProverMultiStream: Sendable {
         """)
 
         return (multiMs, singleMs, speedup)
+    }
+}
+
+// MARK: - DispatchQueue Async Extension
+
+extension DispatchQueue {
+    /// Execute work asynchronously and return a result
+    func asyncExecute<T>(_ work: @escaping () throws -> T) async throws -> T {
+        return try await withCheckedThrowingContinuation { continuation in
+            self.async {
+                do {
+                    let result = try work()
+                    continuation.resume(returning: result)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
     }
 }
 

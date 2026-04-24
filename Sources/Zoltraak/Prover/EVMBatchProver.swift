@@ -98,6 +98,20 @@ public struct BatchProverConfig {
         criticalColumnIndices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     )
 
+    /// Balanced configuration for ~5s proving (between standard and ultra)
+    /// - provingColumnCount: 24 (4x faster FRI vs 180 columns)
+    /// - logTraceLength: 7 (128 rows per tx)
+    public static let balancedFast = BatchProverConfig(
+        batchSize: 175,
+        useGPU: true,
+        logTraceLength: 7,
+        numQueries: 4,
+        logBlowup: 1,
+        useUnifiedProof: true,
+        provingColumnCount: 24,
+        criticalColumnIndices: Array(0..<24)
+    )
+
     /// Non-unified batch proving using GPU multi-stream per-transaction proving.
     ///
     /// This mode proves each transaction separately with GPU optimization but WITHOUT
@@ -116,7 +130,7 @@ public struct BatchProverConfig {
         useGPU: true,
         logTraceLength: 8,
         numQueries: 4,
-        logBlowup: 2,
+        logBlowup: 1,  // Standard mode: 2x blowup (fastest)
         useUnifiedProof: false,  // Key: NOT unified
         provingColumnCount: 32,
         criticalColumnIndices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
@@ -295,7 +309,7 @@ public final class EVMBatchProver: Sendable {
                 semaphore.signal()
             }
 
-            let waitResult = semaphore.wait(timeout: .now() + 600)
+            let waitResult = semaphore.wait(timeout: .now() + 30)
             if waitResult == .timedOut {
                 throw BatchProverError.provingTimeout
             }

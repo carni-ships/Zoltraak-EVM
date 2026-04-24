@@ -54,8 +54,9 @@ public final class GPUEVMInterpreter: Sendable {
     /// Maximum stack depth per EVM spec
     public static let maxStackDepth = 1024
 
-    /// Maximum memory per transaction (2^26 = 64MB)
-    public static let maxMemoryBytes = 1 << 26
+    /// Maximum memory per transaction (2^22 = 4MB - sufficient for most EVM txs)
+    /// With 30M gas, max memory ~8MB. Most txs use <100KB.
+    public static let maxMemoryBytes = 1 << 22   // 4 MB
 
     /// Maximum bytecode size per transaction
     public static let maxCodeSize = 24576  // 24KB

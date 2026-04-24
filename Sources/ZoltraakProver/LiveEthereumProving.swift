@@ -18,14 +18,16 @@ public enum ProvingMode: Sendable {
 public func runLiveProvingMode(
     blockCount: Int,
     quiet: Bool = false,
-    mode: ProvingMode = .unified
+    mode: ProvingMode = .nonUnified
 ) {
-    printZoltraakHeader()
-    print("Live Ethereum Proving Mode")
-    print("Mode: \(modeDescription(mode))")
-    print("============================")
-    print("Quiet mode: \(quiet ? "ON" : "OFF") (summary only)")
-    print("")
+    // Note: Header is printed in main.swift before calling this function
+    if !quiet {
+        print("Live Ethereum Proving Mode")
+        print("Mode: \(modeDescription(mode))")
+        print("============================")
+        print("Quiet mode: OFF (summary only)")
+        print("")
+    }
 
     let endpoints = [
         "https://ethereum-rpc.publicnode.com",
@@ -238,15 +240,17 @@ public func runLiveProvingMode(
 public func runContinuousLiveProving(
     blockLimit: Int,
     quiet: Bool = false,
-    mode: ProvingMode = .unified
+    mode: ProvingMode = .nonUnified
 ) {
-    printZoltraakHeader()
-    print("Continuous Live Ethereum Proving Mode")
-    print("Mode: \(modeDescription(mode))")
-    print("===================================")
-    print("Quiet mode: " + (quiet ? "ON" : "OFF") + " (summary only)")
-    print("Block limit: \(blockLimit == 0 ? "unlimited" : "\(blockLimit)")")
-    print("")
+    // Note: Header is printed in main.swift before calling this function
+    if !quiet {
+        print("Continuous Live Ethereum Proving Mode")
+        print("Mode: \(modeDescription(mode))")
+        print("===================================")
+        print("Quiet mode: OFF (summary only)")
+        print("Block limit: \(blockLimit == 0 ? "unlimited" : "\(blockLimit)")")
+        print("")
+    }
 
     // Select batch prover config based on mode
     let batchConfig: BatchProverConfig

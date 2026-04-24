@@ -1316,6 +1316,11 @@ import zkMetal
         var treeBuffer: MTLBuffer? = nil
         if keepTreeBuffer {
             treeBuffer = device.makeBuffer(length: treeBufSize, options: .storageModeShared)
+            if treeBuffer != nil {
+                fputs("[EVMGPUMerkleEngine] Small tree: SUCCESS allocated \(treeBufSize) bytes for \(numTrees) trees x \(numLeaves) leaves\n", stderr)
+            } else {
+                fputs("[EVMGPUMerkleEngine] Small tree: FAILED to allocate \(treeBufSize) bytes\n", stderr)
+            }
         }
 
         // Copy leaves to tree buffer
@@ -1414,8 +1419,29 @@ import zkMetal
         let subtreeMax = Poseidon2M31Engine.merkleSubtreeSize
         let numSubtrees = numLeaves / subtreeMax
 
-        // Build subtrees first (same as buildTreesBatchLarge)
-        // Step 1: Flatten all trees' leaves
+        // For GPU proof generation with large trees, we preserve the FULL tree structure.
+        // The Metal kernel `poseidon2_m31_merkle_proof_batch` expects a flattened tree where:
+        // - tree[0..numLeaves) = leaves
+        // - tree[numLeaves..numLeaves+numSubtrees) = subtree roots
+        // - tree[numLeaves+numSubtrees..] = upper tree nodes
+
+        // Calculate total buffer size needed per tree: 2 * numLeaves - 1 nodes
+        let treeNodeCount = 2 * numLeaves - 1
+        let treeBufSize = numTrees * treeNodeCount * nodeSize * stride
+
+        var treeBuffer: MTLBuffer? = nil
+        if keepTreeBuffer {
+            treeBuffer = device.makeBuffer(length: treeBufSize, options: .storageModeShared)
+            if treeBuffer != nil {
+                fputs("[EVMGPUMerkleEngine] SUCCESS: Allocated tree buffer: \(treeBufSize) bytes for \(numTrees) trees x \(numLeaves) leaves (subtrees=\(numSubtrees))\n", stderr)
+            } else {
+                fputs("[EVMGPUMerkleEngine] FAILED: Could not allocate tree buffer: \(treeBufSize) bytes for \(numTrees) trees x \(numLeaves) leaves (subtrees=\(numSubtrees))\n", stderr)
+            }
+        } else {
+            fputs("[EVMGPUMerkleEngine] Skipping tree buffer allocation (keepTreeBuffer=false)\n", stderr)
+        }
+
+        // Step 1: Build GPU subtree roots (same as buildTreesBatchLarge)
         let leavesPerTree = numSubtrees * subtreeMax * nodeSize
         let totalLeavesVals = numTrees * leavesPerTree
 
@@ -1435,16 +1461,12 @@ import zkMetal
             }
         }
 
-        // Step 2: Allocate output buffer for subtree roots
         let rootsPerTree = numSubtrees * nodeSize
         let rootsSize = numTrees * rootsPerTree * stride
 
         guard let rootsBuf = device.makeBuffer(length: rootsSize, options: .storageModeShared) else {
             throw GPUProverError.gpuError("Failed to allocate roots buffer")
         }
-
-        // Step 3: Build subtrees
-        let totalSubtrees = numTrees * numSubtrees
 
         guard let cmdBuf = commandQueue.makeCommandBuffer() else {
             throw GPUProverError.noCommandBuffer
@@ -1457,11 +1479,11 @@ import zkMetal
             leavesOffset: 0,
             rootsBuffer: rootsBuf,
             rootsOffset: 0,
-            numSubtrees: totalSubtrees,
+            numSubtrees: numTrees * numSubtrees,
             subtreeSize: subtreeMax
         )
 
-        // Step 4: Process upper levels
+        // Step 2: Hash upper tree levels on GPU
         var currentNodes = numSubtrees
         var srcBuf = rootsBuf
 
@@ -1502,9 +1524,9 @@ import zkMetal
 
         enc.endEncoding()
         cmdBuf.commit()
-        try waitAndCheckError(cmdBuf, operation: "buildTreesWithGPUProofLarge")
+        try waitAndCheckError(cmdBuf, operation: "buildTreesWithGPUProofLarge:subtree")
 
-        // Step 5: Read final roots
+        // Step 3: Read final roots
         let outPtr = srcBuf.contents().bindMemory(to: UInt32.self, capacity: numTrees * nodeSize)
         var roots: [zkMetal.M31Digest] = []
         roots.reserveCapacity(numTrees)
@@ -1518,10 +1540,97 @@ import zkMetal
             roots.append(zkMetal.M31Digest(values: rootValues))
         }
 
-        // Note: For large trees, we don't keep the full tree buffer by default
-        // since it would be very large. For GPU proof generation, we build
-        // a separate compact tree structure optimized for proof queries.
-        return (roots, nil, numLeaves)
+        // Step 4: Build complete flattened tree structure for GPU proof generation
+        // For each tree:
+        //   [leaves at 0..numLeaves-1] [subtree roots at numLeaves..numLeaves+numSubtrees-1] [upper tree at numLeaves+numSubtrees..]
+        if let treeBuf = treeBuffer {
+            let treePtr = treeBuf.contents().bindMemory(to: UInt32.self, capacity: numTrees * treeNodeCount * nodeSize)
+
+            // Copy leaves and hash them in place
+            // Each leaf needs to be hashed with its position
+            // Actually, leaves are already hashed by the subtree kernel into rootsBuf.
+            // For the flattened tree format, we need:
+            // - Leaves at positions 0..numLeaves-1 (these are already in treePtr from copy)
+            // - Subtree roots at positions numLeaves..numLeaves+numSubtrees-1
+            // - Upper tree nodes at positions numLeaves+numSubtrees..
+
+            // Get subtree roots from rootsBuf
+            let subtreeRootsPtr = rootsBuf.contents().bindMemory(to: UInt32.self, capacity: numTrees * rootsPerTree)
+
+            // Copy subtree roots to tree buffer positions [numLeaves, numLeaves + numSubtrees)
+            for treeIdx in 0..<numTrees {
+                let treeStart = treeIdx * treeNodeCount
+
+                // Copy subtree roots
+                for subIdx in 0..<numSubtrees {
+                    let destPos = (treeStart + numLeaves + subIdx) * nodeSize
+                    let srcPos = treeIdx * rootsPerTree + subIdx * nodeSize
+                    for i in 0..<nodeSize {
+                        treePtr[destPos + i] = subtreeRootsPtr[srcPos + i]
+                    }
+                }
+
+                // Copy leaves - from original trace data
+                for leafIdx in 0..<numLeaves {
+                    let destPos = (treeStart + leafIdx) * nodeSize
+                    // Leaves are already in treeLeaves[treeIdx]
+                    let leafStart = leafIdx * nodeSize
+                    for i in 0..<nodeSize {
+                        treePtr[destPos + i] = treesLeaves[treeIdx][leafStart + i].v
+                    }
+                }
+
+                // Build upper tree level-by-level on CPU
+                // Upper tree has numSubtrees leaves (the subtree roots) and builds up to 1 root
+                // We'll compute it using the upperBatch approach on CPU since it's small
+                var upperLevel = [UInt32](repeating: 0, count: numSubtrees * nodeSize)
+                for subIdx in 0..<numSubtrees {
+                    for i in 0..<nodeSize {
+                        upperLevel[subIdx * nodeSize + i] = subtreeRootsPtr[treeIdx * rootsPerTree + subIdx * nodeSize + i]
+                    }
+                }
+
+                // Process upper tree levels
+                var upperSize = numSubtrees
+                var upperOffset = numLeaves + numSubtrees  // Where upper tree starts in flattened tree
+
+                while upperSize > 1 {
+                    let pairs = upperSize / 2
+                    var nextLevel = [UInt32](repeating: 0, count: pairs * nodeSize)
+
+                    for pairIdx in 0..<pairs {
+                        // Hash pair of nodes
+                        let leftSlice = upperLevel[pairIdx * 2 * nodeSize..<(pairIdx * 2 + 1) * nodeSize]
+                        let rightSlice = upperLevel[(pairIdx * 2 + 1) * nodeSize..<(pairIdx * 2 + 2) * nodeSize]
+
+                        let leftVals = Array(leftSlice).map { M31(v: $0) }
+                        let rightVals = Array(rightSlice).map { M31(v: $0) }
+
+                        let hashResult = poseidon2M31Hash(left: leftVals, right: rightVals)
+
+                        for i in 0..<nodeSize {
+                            nextLevel[pairIdx * nodeSize + i] = hashResult[i].v
+                        }
+
+                        // Copy to tree buffer immediately
+                        for i in 0..<nodeSize {
+                            treePtr[(upperOffset + pairIdx) * nodeSize + i] = hashResult[i].v
+                        }
+                    }
+
+                    upperLevel = nextLevel
+                    upperSize = pairs
+                    upperOffset += pairs
+                }
+
+                // Copy final root
+                for i in 0..<nodeSize {
+                    treePtr[(treeStart + treeNodeCount - 1) * nodeSize + i] = upperLevel[i]
+                }
+            }
+        }
+
+        return (roots, treeBuffer, numLeaves)
     }
 
     /// Generate Merkle proofs for multiple trees using GPU.

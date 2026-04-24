@@ -155,6 +155,7 @@ public final class GPUStreamManager: Sendable {
 
     /// Initialize stream manager with configured number of streams
     public init(config: Config = .default) throws {
+        print("[GPUStreamManager] init called with config.numStreams=\(config.numStreams)")
         self.config = config
 
         // Get Metal device

@@ -516,29 +516,25 @@ public final class GPUCircleConstraintEngine: Sendable {
             vzAtBoundary[row] = circleVanishing(point: evalDomain[row], logDomainSize: logEval - logBlowup)
         }
 
-        // Process each boundary constraint
+        // Process each boundary constraint - each constraint only affects its specific row
         for bc in boundaryConstraints {
-            guard bc.row < composition.count else { continue }  // Safety check
+            guard bc.row < composition.count else { continue }
             guard let vz = vzAtBoundary[bc.row], vz.v != 0 else { continue }
 
             // Get trace column
             guard bc.column < traceLDEs.count else { continue }
             let traceCol = traceLDEs[bc.column]
+            guard bc.row < traceCol.count else { continue }
 
-            for row in boundaryRows {
-                guard row < composition.count else { continue }
-                guard let vzRow = vzAtBoundary[row], vzRow.v != 0 else { continue }
+            // Compute diff and quotient
+            let colVal = traceCol[bc.row]
+            let diff = m31Sub(colVal, bc.value)
+            let quotient = m31Mul(diff, m31Inverse(vz))
 
-                // Compute diff and quotient
-                let colVal = traceCol[row]
-                let diff = m31Sub(colVal, bc.value)
-                let quotient = m31Mul(diff, m31Inverse(vzRow))
-
-                // Add alpha^row contribution
-                let alphaIdx = bc.row % maxAlphaPow
-                let alphaPow = alphaPowers[alphaIdx]
-                result[row] = m31Add(result[row], m31Mul(alphaPow, quotient))
-            }
+            // Add alpha^bc.row contribution
+            let alphaIdx = bc.row % maxAlphaPow
+            let alphaPow = alphaPowers[alphaIdx]
+            result[bc.row] = m31Add(result[bc.row], m31Mul(alphaPow, quotient))
         }
 
         fputs("[addBoundaryContributions] ALL DONE\n", stderr)

@@ -217,49 +217,55 @@ extension EVMHyperNovaAggregator {
         numConstraints: Int = 50,
         numWitnessElements: Int = 1024,
         numPublicInputs: Int = 32
-    ) -> CCSInstance {
+    ) throws -> CCSInstance {
         // EVM layout: 180 columns, ~50 constraints
         // Columns: PC(1) + gas(2) + stack(144) + reserved(8) + memory(1) + reserved(2) + opcode(1) + flags(4) + callDepth(1) + stateRoot(3) + timestamp(1) + reserved(12) = 180
         let m = numConstraints
         let n = numWitnessElements + numPublicInputs + 1  // +1 for constant term
 
+        // Validate dimensions to prevent precondition failures in zkMetal
+        guard n >= 2 else {
+            throw HyperNovaError.invalidCCS("n must be >= 2, got \(n)")
+        }
+        guard m >= 1 else {
+            throw HyperNovaError.invalidCCS("m must be >= 1, got \(m)")
+        }
+
         // Build EVM constraint matrices
         // Each matrix represents one constraint type from EVMAIR
+        // CRITICAL: Each matrix MUST have exactly m rows (50), or multisets must be structured accordingly
 
-        // Matrix 0: PC continuity (constraint 0-9)
+        // Matrix 0: PC continuity (constraints 0-9)
         // Verifies: nextPC = currentPC + 1 for non-jump ops
-        let pcMatrix = buildPCContinuityMatrix(m: 10, n: n, numPublic: numPublicInputs)
+        let pcMatrix = buildPCContinuityMatrix(totalConstraints: m, n: n, numPublic: numPublicInputs)
 
-        // Matrix 1: Gas monotonicity (constraint 10-19)
+        // Matrix 1: Gas monotonicity (constraints 10-19)
         // Verifies: gas only decreases
-        let gasMatrix = buildGasMonotonicityMatrix(m: 10, n: n, numPublic: numPublicInputs)
+        let gasMatrix = buildGasMonotonicityMatrix(totalConstraints: m, n: n, numPublic: numPublicInputs)
 
-        // Matrix 2: Call depth (constraint 20-29)
+        // Matrix 2: Call depth (constraints 20-29)
         // Verifies: call depth changes by at most 1
-        let callDepthMatrix = buildCallDepthMatrix(m: 10, n: n, numPublic: numPublicInputs)
+        let callDepthMatrix = buildCallDepthMatrix(totalConstraints: m, n: n, numPublic: numPublicInputs)
 
-        // Matrix 3: Opcode-specific (constraint 30-49)
+        // Matrix 3: Opcode-specific (constraints 30-49)
         // Verifies: arithmetic, comparison, bitwise, memory, control flow
-        let opcodeMatrix = buildOpcodeConstraintMatrix(m: 20, n: n)
+        let opcodeMatrix = buildOpcodeConstraintMatrix(totalConstraints: m, n: n)
 
         let matrices = [pcMatrix, gasMatrix, callDepthMatrix, opcodeMatrix]
 
         // Multisets: groups constraint types for efficient folding
         // CCS uses multiset to select which matrices contribute to each constraint
-        let multisets = [
-            Array(0..<10),    // PC constraints use Matrix 0
-            Array(10..<20),   // Gas constraints use Matrix 1
-            Array(20..<30),   // Call depth constraints use Matrix 2
-            Array(30..<50)    // Opcode constraints use Matrix 3
+        // Structure: [matrix0_indices, matrix1_indices, matrix2_indices, matrix3_indices]
+        let multisets: [[Int]] = [
+            Array(0..<50),    // All 50 constraints use Matrix 0 (PC)
+            Array(0..<50),    // All 50 constraints use Matrix 1 (Gas)
+            Array(0..<50),    // All 50 constraints use Matrix 2 (Call depth)
+            Array(0..<50)    // All 50 constraints use Matrix 3 (Opcode)
         ]
 
         // Coefficients: weights for combining matrices in constraints
-        let coefficients = [
-            Fr.one,   // PC matrix weight
-            Fr.one,   // Gas matrix weight
-            Fr.one,   // Call depth matrix weight
-            Fr.one    // Opcode matrix weight
-        ]
+        // One coefficient per multiset
+        let coefficients = [Fr.one, Fr.one, Fr.one, Fr.one]
 
         return CCSInstance(
             m: m,
@@ -273,92 +279,102 @@ extension EVMHyperNovaAggregator {
 
     /// Build PC continuity constraint matrix
     /// nextPC - currentPC - 1 = 0 for non-jump opcodes
-    private static func buildPCContinuityMatrix(m: Int, n: Int, numPublic: Int) -> SparseMatrix {
-        var rowPtr = [Int](repeating: 0, count: m + 1)
+    private static func buildPCContinuityMatrix(totalConstraints: Int, n: Int, numPublic: Int) -> SparseMatrix {
+        var rowPtr = [Int](repeating: 0, count: totalConstraints + 1)
         var colIdx = [Int]()
         var values = [Fr]()
 
-        for row in 0..<m {
+        for row in 0..<totalConstraints {
             // nextPC - currentPC - 1 = 0
             // nextPC column = 0, currentPC column = 0, constant = 1
             colIdx.append(0)  // nextPC
             values.append(Fr.one)
-            colIdx.append(n - numPublic - 1)  // currentPC
+            // Clamp to valid range [0, n-1]
+            let currentPCCol = max(0, min(n - 1, n - numPublic - 1))
+            colIdx.append(currentPCCol)
             // -1 in BN254 field (p - 1 where p is the field modulus)
             values.append(Fr(v: (0x4ffffffa, 0xac96341c, 0x9f60cd29, 0x36fc7695, 0xb2d6a87a, 0x25e9bbb5, 0x596e72c7, 0x0)))
-        }
-        for row in 0...m {
-            rowPtr[row] = colIdx.count
+
+            // Build rowPtr incrementally: each row has 2 entries
+            rowPtr[row + 1] = rowPtr[row] + 2
         }
 
-        return SparseMatrix(rows: m, cols: n, rowPtr: rowPtr, colIdx: colIdx, values: values)
+        return SparseMatrix(rows: totalConstraints, cols: n, rowPtr: rowPtr, colIdx: colIdx, values: values)
     }
 
     /// Build gas monotonicity constraint matrix
     /// gasNext - gasCurrent <= 0
-    private static func buildGasMonotonicityMatrix(m: Int, n: Int, numPublic: Int) -> SparseMatrix {
-        var rowPtr = [Int](repeating: 0, count: m + 1)
+    private static func buildGasMonotonicityMatrix(totalConstraints: Int, n: Int, numPublic: Int) -> SparseMatrix {
+        var rowPtr = [Int](repeating: 0, count: totalConstraints + 1)
         var colIdx = [Int]()
         var values = [Fr]()
 
-        for row in 0..<m {
+        for row in 0..<totalConstraints {
             // gasNext - gasCurrent <= 0
             colIdx.append(1)  // gasNext column
             values.append(Fr.one)
-            colIdx.append(1 + (n - numPublic - 1) / 2)  // gasCurrent (high part)
+            // Use a column within bounds: (n - 1) is the last witness column
+            let gasCurrentCol = max(1, min(n - 1, (n - numPublic) / 2))
+            colIdx.append(gasCurrentCol)
             // -1 in BN254 field
             values.append(Fr(v: (0x4ffffffa, 0xac96341c, 0x9f60cd29, 0x36fc7695, 0xb2d6a87a, 0x25e9bbb5, 0x596e72c7, 0x0)))
-        }
-        for row in 0...m {
-            rowPtr[row] = colIdx.count
+
+            // Build rowPtr incrementally: each row has 2 entries
+            rowPtr[row + 1] = rowPtr[row] + 2
         }
 
-        return SparseMatrix(rows: m, cols: n, rowPtr: rowPtr, colIdx: colIdx, values: values)
+        return SparseMatrix(rows: totalConstraints, cols: n, rowPtr: rowPtr, colIdx: colIdx, values: values)
     }
 
     /// Build call depth constraint matrix
     /// |nextDepth - currentDepth| <= 1
-    private static func buildCallDepthMatrix(m: Int, n: Int, numPublic: Int) -> SparseMatrix {
-        var rowPtr = [Int](repeating: 0, count: m + 1)
+    private static func buildCallDepthMatrix(totalConstraints: Int, n: Int, numPublic: Int) -> SparseMatrix {
+        var rowPtr = [Int](repeating: 0, count: totalConstraints + 1)
         var colIdx = [Int]()
         var values = [Fr]()
 
-        for row in 0..<m {
+        for row in 0..<totalConstraints {
             // nextDepth - currentDepth <= 1
-            colIdx.append(163)  // call depth column
+            // Use columns within bounds: 0-indexed, max column is n-1
+            let callDepthCol = max(0, min(n - 1, 163))
+            colIdx.append(callDepthCol)
             values.append(Fr.one)
-            colIdx.append(163 + (n - numPublic - 1))  // previous call depth
+            let prevCallDepthCol = max(0, min(n - 1, 163 + (n - numPublic - 1)))
+            colIdx.append(prevCallDepthCol)
             // -1 in BN254 field
             values.append(Fr(v: (0x4ffffffa, 0xac96341c, 0x9f60cd29, 0x36fc7695, 0xb2d6a87a, 0x25e9bbb5, 0x596e72c7, 0x0)))
-        }
-        for row in 0...m {
-            rowPtr[row] = colIdx.count
+
+            // Build rowPtr incrementally: each row has 2 entries
+            rowPtr[row + 1] = rowPtr[row] + 2
         }
 
-        return SparseMatrix(rows: m, cols: n, rowPtr: rowPtr, colIdx: colIdx, values: values)
+        return SparseMatrix(rows: totalConstraints, cols: n, rowPtr: rowPtr, colIdx: colIdx, values: values)
     }
 
     /// Build opcode-specific constraint matrix
     /// Encodes stack, memory, and arithmetic operations
-    private static func buildOpcodeConstraintMatrix(m: Int, n: Int) -> SparseMatrix {
-        var rowPtr = [Int](repeating: 0, count: m + 1)
+    private static func buildOpcodeConstraintMatrix(totalConstraints: Int, n: Int, numPublic: Int = 32) -> SparseMatrix {
+        var rowPtr = [Int](repeating: 0, count: totalConstraints + 1)
         var colIdx = [Int]()
         var values = [Fr]()
 
         // Stack constraints (columns 3-146)
-        for row in 0..<min(m, 20) {
-            let stackCol = 3 + (row % 16) * 9  // Stack slots × limbs
+        for row in 0..<totalConstraints {
+            // Clamp stackCol to valid range [0, n-1]
+            let baseStackCol = 3 + (row % 16) * 9  // Stack slots × limbs
+            let stackCol = max(0, min(n - 1, baseStackCol))
             colIdx.append(stackCol)
             values.append(Fr.one)
 
-            // Include opcode column for selection
-            colIdx.append(158)
+            // Include opcode column for selection (clamped to valid range)
+            let opcodeCol = max(0, min(n - 1, 158))
+            colIdx.append(opcodeCol)
             values.append(Fr.one)
-        }
-        for row in 0...m {
-            rowPtr[row] = colIdx.count
+
+            // Build rowPtr incrementally: each row has 2 entries
+            rowPtr[row + 1] = rowPtr[row] + 2
         }
 
-        return SparseMatrix(rows: m, cols: n, rowPtr: rowPtr, colIdx: colIdx, values: values)
+        return SparseMatrix(rows: totalConstraints, cols: n, rowPtr: rowPtr, colIdx: colIdx, values: values)
     }
 }

@@ -83,7 +83,7 @@ public final class EVMGPUDirectHashEngine {
     }
 
     private static func compileShaders(device: MTLDevice) throws -> MTLLibrary {
-        let shaderPath = "/Users/carnation/Documents/Claude/Zoltraak/Sources/Zoltraak/Shaders/hash/poseidon2_m31_leaf_hash.metal"
+        let shaderPath = "/Users/carnation/Documents/Claude/EVMetal/Sources/Zoltraak/Shaders/hash/poseidon2_m31_leaf_hash.metal"
 
         guard FileManager.default.fileExists(atPath: shaderPath) else {
             throw GPUProverError.missingKernel

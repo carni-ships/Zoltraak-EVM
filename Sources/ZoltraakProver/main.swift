@@ -3,33 +3,31 @@ import zkMetal
 import Zoltraak
 
 /// Command-line arguments for running tests:
-///   ./ZoltraakProver              - Run all tests
+///   ./ZoltraakProver              - Run continuous live Ethereum proving (default)
+///   ./ZoltraakProver tests        - Run all tests
 ///   ./ZoltraakProver benchmarks   - Run benchmarks
-///   ./ZoltraakProver quick       - Run quick tests (skip slow E2E)
-///   ./ZoltraakProver gpu         - Run GPU batch tests only
+///   ./ZoltraakProver quick        - Run quick tests (skip slow E2E)
+///   ./ZoltraakProver gpu          - Run GPU batch tests only
 ///   ./ZoltraakProver e2e         - Run E2E tests only
-///   ./ZoltraakProver opcode      - Run opcode tests only
-///   ./ZoltraakProver phase-bench - Run Phase 2/3 integration benchmark
-///   ./ZoltraakProver comparison  - Run comparison benchmark
-///   ./ZoltraakProver unified    - Run unified block proof benchmark
-///   ./ZoltraakProver full-compare - Run full block comparison
-///   ./ZoltraakProver real-block [num] - Fetch and test real Ethereum block
-///   ./ZoltraakProver real-block-unified [num] - Fetch and test real block with unified proving
-///   ./ZoltraakProver real-block-unified [num] [compression] - compression: standard (32 cols), fast (16 cols)
+///   ./ZoltraakProver opcode       - Run opcode tests only
+///   ./ZoltraakProver eth-live [n] - Prove n blocks from live Ethereum
+///   ./ZoltraakProver eth-live-cont [limit] - Continuous proving (default)
+///     - -q/--quiet for summary-only output
+///   ./ZoltraakProver real-block-unified [num] [compression] - compression: standard (32 cols), balanced (24 cols), fast (16 cols)
 ///   ./ZoltraakProver synthetic-block - Run synthetic block benchmark
 ///   ./ZoltraakProver test <name> - Run specific test by name
-///   ./ZoltraakProver compression - Run proof compression benchmarks
-///   ./ZoltraakProver compression-compare - Compare baseline vs compressed
-///   ./ZoltraakProver compression-tests - Run proof compression tests
 
 let args = ProcessInfo.processInfo.arguments
-let mode = args.count > 1 ? args[1] : "tests"
+let mode = args.count > 1 ? args[1] : "eth-live-cont"
 let testFilter = args.count > 2 ? args[2] : nil
 
-// Print header for interactive modes
+// Print header for interactive modes (unless quiet flag is set)
+let quietMode = args.contains("-q") || args.contains("--quiet")
 switch mode {
 case "eth-live", "eth-live-cont", "benchmarks", "quick", "gpu", "e2e", "opcode":
-    printZoltraakHeader()
+    if !quietMode {
+        printZoltraakHeader()
+    }
 default:
     break
 }
@@ -92,6 +90,9 @@ case "real-block-unified":
 
     let compressionConfig: BatchProverConfig
     switch compressionArg {
+    case "balanced":
+        print("Using balanced compression (24 columns, ~5s proving)")
+        compressionConfig = .balancedFast
     case "fast", "ultra":
         print("Using ultra-fast compression (16 columns)")
         compressionConfig = .ultraFast
@@ -198,10 +199,10 @@ case "eth-live":
     runLiveProvingMode(blockCount: blockCount, quiet: quietMode)
 
 case "eth-live-cont":
-    // Continuous live proving - run forever
+    // Continuous live proving - run forever (default: unified mode for speed)
     let blockLimit = args.count > 2 ? Int(args[2]) ?? 0 : 0  // 0 = unlimited
     let quietMode = args.contains("-q") || args.contains("--quiet")
-    runContinuousLiveProving(blockLimit: blockLimit, quiet: quietMode)
+    runContinuousLiveProving(blockLimit: blockLimit, quiet: quietMode, mode: .unified)
 
 default:
     print("=== Zoltraak Prover Test Suite ===\n")

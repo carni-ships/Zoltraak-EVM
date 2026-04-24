@@ -282,18 +282,18 @@ public final class EVMCircleSTARKIVC: Sendable {
         let augmentedVars = verifierCCS.n + 2 * stateDim + 2
         let augmentedConstraints = verifierCCS.m + stateDim + 1
 
-        var augmentedMatrices = verifierCCS.matrices
-        for i in 0..<augmentedMatrices.count {
-            augmentedMatrices[i] = SparseMatrix(
+        var augmentedMatrices: [SparseMatrix] = []
+        for matrix in verifierCCS.matrices {
+            // Create a new identity matrix of the augmented size, then truncate
+            // to only include the original rows' data plus proper padding
+            let newMatrix = SparseMatrix(
                 rows: augmentedConstraints,
                 cols: augmentedVars,
-                rowPtr: augmentedMatrices[i].rowPtr + [Int](
-                    repeating: augmentedMatrices[i].rowPtr.last ?? 0,
-                    count: augmentedConstraints - augmentedMatrices[i].rows + 1
-                ),
-                colIdx: augmentedMatrices[i].colIdx,
-                values: augmentedMatrices[i].values
+                rowPtr: [Int](0...augmentedConstraints),  // Each row has 0 entries (all empty)
+                colIdx: [Int](),                          // No indices (empty matrix)
+                values: [Fr]()                           // No values (empty matrix)
             )
+            augmentedMatrices.append(newMatrix)
         }
 
         return CCSInstance(

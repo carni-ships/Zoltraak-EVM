@@ -15,31 +15,24 @@ MAGENTA='\033[0;35m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-# ASCII Art - Zoltraak title
+# ASCII Art - Zoltraak title (unboxed, no colors)
 ZOLTRAAK_ART="
-${CYAN}
-╔══════════════════════════════════════════════════════════╗
-║                                                          ║
-║   ${MAGENTA}  ..      s                                               ..     ${CYAN}  ║
-║   ${MAGENTA} :~\"\"\"88hx.                x .d88\"      :8                                         < .z@8\"\` ${CYAN}  ║
-║   ${MAGENTA}.~      ?888x          u.    5888R      .88       .u    .                            !@88E ${CYAN}  ║
-║   ${MAGENTA} X       '8888k   ...ue888b   '888R     :888ooo  .d88B :@8c        u           u      '888E   u ${CYAN}  ║
-║   ${MAGENTA}   H8h    8888X   888R Y888r   888R   -*8888888 =\"8888f8888r    us888u.     us888u.    888E u@8NL ${CYAN}  ║
-║   ${MAGENTA}  ?888~   8888    888R I888>   888R     8888      4888>'88\"  .@88 \"8888\" .@88 \"8888\"   888E\`\"88*\" ${CYAN}  ║
-║   ${MAGENTA}   %X   .X8*\"     888R I888>   888R     8888      4888> '    9888  9888  9888  9888    888E .dN. ${CYAN}  ║
-║   ${MAGENTA}   .-\"\`\"tnx.     888R I888>   888R     8888      4888>      9888  9888  9888  9888    888E~8888 ${CYAN}  ║
-║   ${MAGENTA}  :~      8888.  u8888cJ888    888R    .8888Lu=  .d888L .+   9888  9888  9888  9888    888E '888& ${CYAN}  ║
-║   ${MAGENTA}  ~       X8888   \"*888*P\"    .888B .  ^%888*    ^\"8888*\"    9888  9888  9888  9888    888E  9888. ${CYAN}  ║
-║   ${MAGENTA} ...      '8888L    'Y\"       ^*888%     'Y\"        \"Y\"      \"888*\"\"888\" \"888*\"\"888\" '\"888*\" 4888\" ${CYAN}  ║
-║   ${MAGENTA}'888k     '8888f                \"%                            ^Y\"   ^Y'   ^Y\"   ^Y'     \"\"    \"\" ${CYAN}  ║
-║   ${MAGENTA} 8888>    <8888                                                                   ${CYAN}  ║
-║   ${MAGENTA} \`888>    X888~                                                                   ${CYAN}  ║
-║   ${MAGENTA}  '\"88...x8\"\"                                                                     ${CYAN}  ║
-║   ${MAGENTA}                                                                                         ${CYAN}  ║
-║   ${MAGENTA}                           EVM \u{2022} STARK \u{2022} GPU${CYAN}                                           ${MAGENTA}  ║
-║                                                          ║
-╚══════════════════════════════════════════════════════════╝
-${NC}"
+                                   ..      s                                               ..
+   :~\"\"\"88hx.                x .d88\"      :8                                         < .z@8\"\`
+ .~      ?888x          u.    5888R      .88       .u    .                            !@88E
+ X       '8888k   ...ue888b   '888R     :888ooo  .d88B :@8c        u           u      '888E   u
+   H8h    8888X   888R Y888r   888R   -*8888888 =\"8888f8888r    us888u.     us888u.    888E u@8NL
+  ?888~   8888    888R I888>   888R     8888      4888>'88\"  .@88 \"8888\" .@88 \"8888\"   888E\`\"88*\"
+   %X   .X8*\"     888R I888>   888R     8888      4888> '    9888  9888  9888  9888    888E .dN.
+   .-\"\"\"tnx.     888R I888>   888R     8888      4888>      9888  9888  9888  9888    888E~8888
+  :~      8888.  u8888cJ888    888R    .8888Lu=  .d888L .+   9888  9888  9888  9888    888E '888&
+  ~       X8888   \"*888*P\"    .888B .  ^%888*    ^\"8888*\"    9888  9888  9888  9888    888E  9888.
+ ...      '8888L    'Y\"       ^*888%     'Y\"        \"Y\"      \"888*\"\"888\" \"888*\"\"888\" '\"888*\" 4888\"
+'888k     '8888f                \"%                            ^Y\"   ^Y'   ^Y\"   ^Y'     \"\"    \"\"
+ 8888>    <8888
+ \`888>    X888~
+  '\"88...x8\"\"
+"
 
 # Magic circle frames (8 frames for animation)
 MAGIC_CIRCLE_FRAMES=(
@@ -109,7 +102,7 @@ ${MAGENTA}   ╲                           ╱    ${NC}
 ${MAGENTA}    ✦ ════════════════ ════════════════ ✦    ${NC}"
 )
 
-SPINNER_CHARS="/-\\|"
+SPINNER_CHARS="/-\|"
 
 # Print header
 echo -e "$ZOLTRAAK_ART"
@@ -167,7 +160,7 @@ if [ $BUILD_RESULT -eq 0 ]; then
     echo -e "${NC}"
 
     # Verify binary
-    BINARY=".build/$BUILD_TYPE/ZoltraakRunner"
+    BINARY=".build/$BUILD_TYPE/ZoltraakProver"
     if [ -f "$BINARY" ]; then
         SIZE=$(du -h "$BINARY" 2>/dev/null | cut -f1 || echo "unknown")
         echo -e "  ${GREEN}▸${NC} Binary: ${CYAN}$BINARY${NC}"
