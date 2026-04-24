@@ -169,13 +169,32 @@ Zoltraak targets **~134 bits of security**, slightly exceeding the industry stan
 - Exceeds the ~128-bit standard used by most production ZK systems
 - Margin above standard allows for configuration flexibility
 
-**Note:** Actual security depends on FRI configuration. Full 180-column proving targets ~134 bits. Column subset modes (standard, balanced, ultra) trade security for speed - use based on your security requirements.
+**Note:** Actual security depends on FRI configuration. Full 180-column proving targets ~137 bits. Column subset modes (standard, balanced, ultra) trade security for speed - use based on your security requirements.
+
+### Unified vs Per-Transaction Proving
+
+| Mode | 111 Transactions | Per-TX Time | Proofs | Security |
+|------|------------------|-------------|--------|----------|
+| Unified (standard) | ~6.6s total | N/A | 1 | ~134 bits |
+| Non-unified (full) | ~43-51s per tx | ~43-51s | 111 | ~137 bits |
+
+**Unified block proving** generates a single proof for all transactions in a block - much more efficient for on-chain verification.
+
+**Per-transaction proving** generates separate proofs for each transaction - required for certain applications but significantly slower.
+
+### IVC (Incremental Verifiable Computation)
+
+Zoltraak supports Nova-style IVC for recursive proof aggregation across multiple blocks. This enables:
+- **Constant-time verification** regardless of block chain length
+- **Single proof** for an arbitrarily long history of blocks
+- **Transparent verification** (no trusted setup required)
+
+Note: IVC CLI integration is under development.
 
 ## Documentation
 
 - [LiveEthereumProving.md](DOCUMENTATION/LiveEthereumProving.md) - Real-time proving guide
 - [ProofCompression.md](DOCUMENTATION/ProofCompression.md) - FRI column optimization
-- [RECURSIVE-AGGREGATION-DESIGN.md](docs/RECURSIVE-AGGREGATION-DESIGN.md) - Nova IVC for aggregation
 
 ## Solidity Verifiers
 

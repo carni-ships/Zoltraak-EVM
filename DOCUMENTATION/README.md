@@ -10,15 +10,13 @@ Technical documentation for the Zoltraak ZK proving system.
 |----------|-------------|
 | [LiveEthereumProving](LiveEthereumProving.md) | Real-time block proving against Ethereum mainnet |
 | [ProofCompression](ProofCompression.md) | FRI column subset optimization for smaller proofs |
-| [M31-ONCHAIN-VERIFIER-DESIGN](docs/M31-ONCHAIN-VERIFIER-DESIGN.md) | On-chain verification of M31 STARK proofs |
-| [RECURSIVE-AGGREGATION-DESIGN](docs/RECURSIVE-AGGREGATION-DESIGN.md) | Nova IVC for recursive proof aggregation |
 
 ### Research & Analysis
 
 | Document | Description |
 |----------|-------------|
-| [CONSENSUS-PROOF-RESEARCH](docs/CONSENSUS-PROOF-RESEARCH.md) | Consensus proof mechanisms |
-| [EVM-COVERAGE-GAPS](docs/EVM-COVERAGE-GAPS.md) | EVM opcode coverage analysis |
+| [M31-ONCHAIN-VERIFIER-DESIGN](../docs/M31-ONCHAIN-VERIFIER-DESIGN.md) | On-chain verification of M31 STARK proofs |
+| [RECURSIVE-AGGREGATION-DESIGN](../docs/RECURSIVE-AGGREGATION-DESIGN.md) | Nova IVC for recursive proof aggregation |
 
 ## Quick Reference
 
@@ -29,31 +27,31 @@ Technical documentation for the Zoltraak ZK proving system.
 swift test
 
 # Specific test
-./ZoltraakRunner test <name>
-
-# Benchmarks
-./ZoltraakRunner benchmarks
+swift test --filter <test_name>
 ```
 
 ### Live Proving
 
 ```bash
-# Single block
-./ZoltraakRunner eth-live 1
+# Prove a block (standard mode - 32 columns, ~6-7s)
+./ZoltraakProver real-block-unified <block_number> standard
 
-# Continuous (until Ctrl+C)
-./ZoltraakRunner eth-live-cont
+# Balanced mode (24 columns, ~4-6s)
+./ZoltraakProver real-block-unified <block_number> balanced
 
-# Quiet mode
-./ZoltraakRunner eth-live 3 -q
+# Ultra mode (16 columns, ~1-2s)
+./ZoltraakProver real-block-unified <block_number> ultra
+
+# Full mode (180 columns, ~18s, max security)
+./ZoltraakProver real-block-unified <block_number> full
 ```
 
 ### Comparison Benchmarks
 
 ```bash
-# Full block comparison
-./ZoltraakRunner full-compare
+# Unified block proving benchmark
+./ZoltraakProver unified
 
-# Phase 2/3 integration
-./ZoltraakRunner phase-bench
+# Full comparison of all approaches
+./ZoltraakProver full-compare
 ```

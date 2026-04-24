@@ -9,21 +9,17 @@ Real-time STARK proof generation and verification against Ethereum mainnet.
 ## Quick Start
 
 ```bash
-# Prove a single block
-./ZoltraakRunner eth-live 1
+# Prove a single block with standard compression (32 columns)
+./ZoltraakProver real-block-unified <block_number> standard
 
-# Prove 3 blocks
-./ZoltraakRunner eth-live 3
+# Prove with balanced compression (24 columns, ~4-6s)
+./ZoltraakProver real-block-unified <block_number> balanced
 
-# Prove continuously (until Ctrl+C)
-./ZoltraakRunner eth-live-cont
+# Prove with ultra-fast compression (16 columns, ~1-2s)
+./ZoltraakProver real-block-unified <block_number> ultra
 
-# Prove up to N blocks continuously
-./ZoltraakRunner eth-live-cont 10
-
-# Quiet mode (summary only)
-./ZoltraakRunner eth-live 1 -q
-./ZoltraakRunner eth-live-cont 5 -q
+# Prove with full columns (180 columns, ~18s, max security)
+./ZoltraakProver real-block-unified <block_number> full
 ```
 
 ## Architecture
@@ -31,54 +27,31 @@ Real-time STARK proof generation and verification against Ethereum mainnet.
 ```
 Ethereum RPC
     ↓
-fetchBlockData() → LiveBlockData (hash, txs, timestamp)
+RealEthereumBlockFetcher.fetchBlock() → BlockData (hash, txs, timestamp)
     ↓
-EVMBatchProver.proveBatch() → GPU Circle STARK Proof
+EVMetalBlockProver.prove() → GPU Circle STARK Proof
     ↓
 EVMVerifier.verify() → STARK Verification Result
     ↓
-Statistics (proving time, realtime rate, throughput)
+Statistics (proving time, verification time, throughput)
 ```
 
 ## Commands
 
-### `eth-live [blocks] [-q|--quiet]`
+### `real-block-unified <block> [compression]`
 
-Fetch and prove N blocks (default: 1). Each block is processed sequentially.
+Fetch and prove a single block with unified block proving.
 
 **Options:**
-- `blocks`: Number of blocks to prove (default: 1)
-- `-q`, `--quiet`: Summary-only output
+- `block`: Block number to prove (e.g., `18351000`)
+- `compression`: One of `standard` (32 cols), `balanced` (24 cols), `ultra` (16 cols), `full` (180 cols)
 
 **Output Example:**
 ```
-Block #24940906: STARK 1/1 | prove 11897.6ms | verify 5.24ms | 100.0% realtime | 36.2 tx/s
-
-SUMMARY
-Blocks: 1 | Success: 1 | Failed: 0
-Realtime: 100.0% on-time (1/1)
-Transactions: 431
-Proving: 11897.6ms total
-Verifying: 5.24ms
-Throughput: 36.2 tx/s
-```
-
-### `eth-live-cont [limit] [-q|--quiet]`
-
-Continuous proving mode. Fetches the latest block, proves it, then waits for the next block. Repeats until interrupted or `limit` blocks are reached.
-
-**Options:**
-- `limit`: Maximum blocks to prove (0 = unlimited)
-- `-q`, `--quiet`: Summary-only output
-
-**Output Example:**
-```
-Continuous Live Ethereum Proving Mode
-Starting from block #24940907
-
-Block #24940907: STARK 1/1 | prove 10234.1ms | verify 4.87ms | 100.0% realtime | 38.1 tx/s
-Block #24940908: STARK 1/1 | prove 9876.3ms | verify 4.92ms | 100.0% realtime | 40.2 tx/s
-...
+Block #0x1180398 - 111 transactions:
+   Total time: 6614.5ms (6.61s)
+   Per-transaction: 59.6ms
+   Throughput: 16.8 tx/s
 ```
 
 ## Realtime Tracking
@@ -133,14 +106,27 @@ For unified batch proving, a single `GPUCircleSTARKProverProof` covers all trans
 
 ## Performance
 
-Typical performance on Apple Silicon M3 Max:
-- **Proving**: ~10-12s per block (depends on transaction count)
+Typical performance on Apple Silicon M3 Max (111 tx block):
+
+| Mode | Time | Security |
+|------|------|----------|
+| Ultra (16 cols) | ~2s | ~130 bits |
+| Balanced (24 cols) | ~4-6s | ~132 bits |
+| Standard (32 cols) | ~6-7s | ~134 bits |
+| Full (180 cols) | ~18s | ~137 bits |
+
 - **Verifying**: ~5ms per block
-- **Throughput**: 30-40 tx/s
+- **Throughput**: 15-20 tx/s (standard mode)
+
+## Limitations
+
+1. **Archive node support**: Full state witness requires archive node data
+2. **Synthetic transactions**: Calldata simplified for proving
+3. **IVC aggregation**: Not yet available via CLI (under development)
 
 ## Future Improvements
 
 - [ ] Archive node support for full state witness
 - [ ] ethrex integration for local block syncing
+- [ ] IVC recursive aggregation for multiple blocks
 - [ ] Full FRI verification for unified proofs
-- [ ] Recursive aggregation (Nova IVC) for multiple blocks
