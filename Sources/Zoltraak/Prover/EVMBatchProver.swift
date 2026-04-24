@@ -252,7 +252,7 @@ public final class EVMBatchProver: Sendable {
             logBlowup: config.logBlowup,
             logTraceLength: config.logTraceLength,
             useGPU: config.useGPU,
-            maxTransactionsPerBlock: 500,  // Handle large blocks (Ethereum can have 300-400+ tx)
+            maxTransactionsPerBlock: 1500,  // Handle any Ethereum block (max ~3000 simple transfers at 60M gas)
             enableInterTxConstraints: true,
             gpuBatchSize: 512
         )
