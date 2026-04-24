@@ -88,7 +88,7 @@ public final class AccountManager: @unchecked Sendable {
     }
 }
 
-extension [UInt8] {
+public extension [UInt8] {
     func toM31Word() -> M31Word {
         M31Word(bytes: self)
     }
@@ -475,4 +475,171 @@ public struct EVMState: Sendable {
     public mutating func returnData(_ data: [UInt8]) {
         currentFrame.returnData = data
     }
+}
+
+// MARK: - Transaction State for Initial State Loading
+
+/// Pre-execution state for a transaction, fetched from archive node.
+///
+/// This represents the state that exists before a transaction executes,
+/// including account balances and storage values that the transaction may depend on.
+public struct EVMTransactionState: Sendable {
+    /// Account balances indexed by address hex string
+    public let balances: [String: M31Word]
+
+    /// Account nonces indexed by address hex string
+    public let nonces: [String: UInt64]
+
+    /// Contract bytecode indexed by address hex string
+    public let codes: [String: [UInt8]]
+
+    /// Contract code hashes indexed by address hex string
+    public let codeHashes: [String: M31Word]
+
+    /// Storage values indexed by "address:slot" string
+    public let storage: [String: M31Word]
+
+    public init(
+        balances: [String: M31Word] = [:],
+        nonces: [String: UInt64] = [:],
+        codes: [String: [UInt8]] = [:],
+        codeHashes: [String: M31Word] = [:],
+        storage: [String: M31Word] = [:]
+    ) {
+        self.balances = balances
+        self.nonces = nonces
+        self.codes = codes
+        self.codeHashes = codeHashes
+        self.storage = storage
+    }
+
+    /// Get balance for an address
+    public func getBalance(_ address: M31Word) -> M31Word {
+        balances[address.toHexString().lowercased()] ?? .zero
+    }
+
+    /// Get nonce for an address
+    public func getNonce(_ address: M31Word) -> UInt64 {
+        nonces[address.toHexString().lowercased()] ?? 0
+    }
+
+    /// Get code for an address
+    public func getCode(_ address: M31Word) -> [UInt8] {
+        codes[address.toHexString().lowercased()] ?? []
+    }
+
+    /// Get code hash for an address
+    public func getCodeHash(_ address: M31Word) -> M31Word {
+        codeHashes[address.toHexString().lowercased()] ?? .zero
+    }
+
+    /// Get storage value for a contract at a specific slot
+    public func getStorage(contract: M31Word, slot: M31Word) -> M31Word {
+        let key = "\(contract.toHexString().lowercased()):\(slot.toHexString().lowercased())"
+        return storage[key] ?? .zero
+    }
+
+    /// Check if address has code
+    public func hasCode(_ address: M31Word) -> Bool {
+        guard let code = codes[address.toHexString()] else { return false }
+        return !code.isEmpty
+    }
+
+    /// Load this state into an EVMState
+    public func loadIntoState(_ state: inout EVMState) {
+        // Load balances into account manager
+        for (addressHex, balance) in balances {
+            if let address = hexToM31Word(addressHex) {
+                if let existingAccount = state.accountManager.accounts[addressHex] {
+                    var account = existingAccount
+                    account.balance = balance
+                    state.accountManager.accounts[addressHex] = account
+                } else {
+                    let account = Account(address: address, balance: balance)
+                    state.accountManager.accounts[addressHex] = account
+                }
+            }
+        }
+
+        // Load nonces into account manager
+        for (addressHex, nonce) in nonces {
+            if let address = hexToM31Word(addressHex) {
+                if var existingAccount = state.accountManager.accounts[addressHex] {
+                    existingAccount.nonce = nonce
+                    state.accountManager.accounts[addressHex] = existingAccount
+                } else {
+                    let account = Account(address: address, nonce: nonce)
+                    state.accountManager.accounts[addressHex] = account
+                }
+            }
+        }
+
+        // Load codes into account manager
+        for (addressHex, code) in codes {
+            if let address = hexToM31Word(addressHex) {
+                if var existingAccount = state.accountManager.accounts[addressHex] {
+                    existingAccount.setCode(code)
+                    state.accountManager.accounts[addressHex] = existingAccount
+                } else {
+                    let account = Account(address: address, code: code)
+                    state.accountManager.accounts[addressHex] = account
+                }
+            }
+        }
+
+        // Load storage values into state storage
+        for (key, value) in storage {
+            let parts = key.split(separator: ":")
+            if parts.count == 2,
+               let contract = hexToM31Word(String(parts[0])),
+               let slot = hexToM31Word(String(parts[1])) {
+                state.storage.store(key: slot, value: value)
+            }
+        }
+    }
+}
+
+// MARK: - Helper Functions
+
+/// Convert a hex string to M31Word
+/// Supports Ethereum addresses (20 bytes) and 32-byte values
+/// - Parameter hex: Hex string with optional 0x prefix
+/// - Returns: M31Word representation, or nil if invalid
+func hexToM31Word(_ hex: String) -> M31Word? {
+    var cleanHex = hex
+    if hex.hasPrefix("0x") || hex.hasPrefix("0X") {
+        cleanHex = String(hex.dropFirst(2))
+    }
+
+    // Pad to 32 bytes (64 hex chars) for M31Word
+    while cleanHex.count < 64 {
+        cleanHex = "0" + cleanHex
+    }
+
+    // Take last 64 chars if too long
+    if cleanHex.count > 64 {
+        cleanHex = String(cleanHex.suffix(64))
+    }
+
+    // Convert hex to bytes
+    var bytes = [UInt8]()
+    var index = cleanHex.startIndex
+    while index < cleanHex.endIndex {
+        let nextIndex = cleanHex.index(index, offsetBy: 2)
+        if nextIndex > cleanHex.endIndex { break }
+        let byteString = String(cleanHex[index..<nextIndex])
+        if let byte = UInt8(byteString, radix: 16) {
+            bytes.append(byte)
+        } else {
+            return nil
+        }
+        index = nextIndex
+    }
+
+    // Pad to 32 bytes if needed (for addresses)
+    while bytes.count < 32 {
+        bytes.insert(0, at: 0)
+    }
+
+    return M31Word(bytes: bytes)
 }

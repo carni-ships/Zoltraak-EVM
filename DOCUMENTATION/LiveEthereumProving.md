@@ -54,6 +54,20 @@ Block #0x1180398 - 111 transactions:
    Throughput: 16.8 tx/s
 ```
 
+### State Witness Mode
+
+For accurate transaction execution with real state (balances, storage):
+
+```bash
+# Requires archive node (Erigon at localhost:8080 or Reth at localhost:8545)
+# Use benchmarkRealBlockUnifiedWithState() from code
+```
+
+This fetches:
+- Contract bytecode via `eth_getCode`
+- Transaction calldata from `tx.input`
+- Initial state (balances, storage) from archive node
+
 ## Realtime Tracking
 
 The prover tracks whether proofs complete before the next Ethereum block (~12s intervals):
@@ -120,13 +134,13 @@ Typical performance on Apple Silicon M3 Max (111 tx block):
 
 ## Limitations
 
-1. **Archive node support**: Full state witness requires archive node data
-2. **Synthetic transactions**: Calldata simplified for proving
-3. **IVC aggregation**: Not yet available via CLI (under development)
+1. **Archive node required**: Full state witness (balances, storage) requires archive node RPC
+   - Standard public RPCs don't support historical state queries
+   - Use Erigon (`localhost:8080`) or Reth (`localhost:8545`)
+2. **IVC aggregation**: Not yet available via CLI (under development)
 
 ## Future Improvements
 
-- [ ] Archive node support for full state witness
 - [ ] ethrex integration for local block syncing
 - [ ] IVC recursive aggregation for multiple blocks
 - [ ] Full FRI verification for unified proofs

@@ -863,6 +863,10 @@ public struct EVMTransaction: Sendable {
     /// Unique identifier for this transaction
     public let txHash: String
 
+    /// Initial state for the transaction (balances, storage)
+    /// This enables accurate execution of transactions that depend on pre-existing state
+    public let initialState: EVMTransactionState?
+
     public init(
         code: [UInt8],
         calldata: [UInt8] = [],
@@ -870,7 +874,8 @@ public struct EVMTransaction: Sendable {
         gasLimit: UInt64 = 30_000_000,
         sender: M31Word? = nil,
         nonce: UInt64 = 0,
-        txHash: String = ""
+        txHash: String = "",
+        initialState: EVMTransactionState? = nil
     ) {
         self.code = code
         self.calldata = calldata
@@ -879,6 +884,7 @@ public struct EVMTransaction: Sendable {
         self.sender = sender
         self.nonce = nonce
         self.txHash = txHash.isEmpty ? Self.computeTxHash(code: code, calldata: calldata) : txHash
+        self.initialState = initialState
     }
 
     /// Compute transaction hash for identification

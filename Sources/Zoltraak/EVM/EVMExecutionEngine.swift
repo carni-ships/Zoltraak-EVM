@@ -308,7 +308,8 @@ public final class EVMExecutionEngine: Sendable {
         code: [UInt8],
         calldata: [UInt8] = [],
         value: M31Word = .zero,
-        gasLimit: UInt64 = 30_000_000
+        gasLimit: UInt64 = 30_000_000,
+        initialState: EVMTransactionState? = nil
     ) throws -> EVMExecutionResult {
         return try executeInternal(
             code: code,
@@ -316,7 +317,8 @@ public final class EVMExecutionEngine: Sendable {
             value: value,
             gasLimit: gasLimit,
             block: block,
-            tx: tx
+            tx: tx,
+            initialState: initialState
         )
     }
 
@@ -329,7 +331,8 @@ public final class EVMExecutionEngine: Sendable {
         gasLimit: UInt64 = 30_000_000,
         block: BlockContext,
         tx: TransactionContext,
-        enableBatchKeccak: Bool = true
+        enableBatchKeccak: Bool = true,
+        initialState: EVMTransactionState? = nil
     ) throws -> EVMExecutionResult {
         // Estimate trace capacity based on gas limit
         // Conservative estimate: 1 row per 100 gas units
@@ -357,6 +360,11 @@ public final class EVMExecutionEngine: Sendable {
         // Initialize state
         var state = EVMState(block: block, tx: tx)
         state.gas = gasLimit
+
+        // Load initial state if provided (for real Ethereum block proving)
+        if let txState = initialState {
+            txState.loadIntoState(&state)
+        }
 
         // Set up initial frame
         var frame = CallFrame(code: code, calldata: calldata)

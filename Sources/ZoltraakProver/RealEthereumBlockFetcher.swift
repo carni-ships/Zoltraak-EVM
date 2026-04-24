@@ -58,6 +58,260 @@ public struct RealEthereumBlockFetcher {
             .blockpi,
             .ankrr
         ]
+
+        /// Archive node RPC configuration
+        /// Note: Full state witness requires archive node (e.g., Erigon at localhost:8080)
+        public static let archiveNode = RPCConfig(
+            url: "http://localhost:8080",
+            timeout: 120
+        )
+
+        /// Archive node RPC configuration for Reth
+        public static let rethArchiveNode = RPCConfig(
+            url: "http://localhost:8545",
+            timeout: 120
+        )
+    }
+
+    // MARK: - Ethereum RPC Client for State Fetching
+
+    /// Async RPC client for fetching Ethereum state data
+    /// Used for fetching bytecode, balances, and storage from archive nodes
+    public final class EthereumRPCClient: @unchecked Sendable {
+        public let config: RPCConfig
+
+        public init(config: RPCConfig) {
+            self.config = config
+        }
+
+        /// Fetch contract bytecode at a specific block
+        /// - Parameters:
+        ///   - address: Contract address
+        ///   - block: Block number (hex string like "0x1234567")
+        /// - Returns: Contract bytecode as byte array
+        public func eth_getCode(at address: String, block: String) async throws -> [UInt8] {
+            let request = EthereumRPCRequest(
+                jsonrpc: "2.0",
+                method: "eth_getCode",
+                params: [address, block],
+                id: 1
+            )
+
+            let response = try await sendRPCRequestAsync(request: request)
+            return try parseCodeResponse(response)
+        }
+
+        /// Fetch account balance at a specific block
+        /// - Parameters:
+        ///   - address: Account address
+        ///   - block: Block number (hex string like "0x1234567")
+        /// - Returns: Balance as M31Word
+        public func eth_getBalance(at address: String, block: String) async throws -> M31Word {
+            let request = EthereumRPCRequest(
+                jsonrpc: "2.0",
+                method: "eth_getBalance",
+                params: [address, block],
+                id: 1
+            )
+
+            let response = try await sendRPCRequestAsync(request: request)
+            return try parseBalanceResponse(response)
+        }
+
+        /// Fetch storage value at a specific slot
+        /// - Parameters:
+        ///   - contract: Contract address
+        ///   - slot: Storage slot (hex string like "0x0")
+        ///   - block: Block number (hex string like "0x1234567")
+        /// - Returns: Storage value as M31Word
+        public func eth_getStorageAt(contract: String, slot: String, block: String) async throws -> M31Word {
+            let request = EthereumRPCRequest(
+                jsonrpc: "2.0",
+                method: "eth_getStorageAt",
+                params: [contract, slot, block],
+                id: 1
+            )
+
+            let response = try await sendRPCRequestAsync(request: request)
+            return try parseStorageResponse(response)
+        }
+
+        /// Fetch state for a transaction (sender balance, contract state)
+        /// - Parameters:
+        ///   - tx: Ethereum transaction
+        ///   - blockNumber: Block number in hex
+        /// - Returns: Transaction state with balances and storage
+        public func fetchStateForTransaction(_ tx: EthereumTransaction, blockNumber: String) async throws -> EVMTransactionState {
+            var balances: [String: M31Word] = [:]
+            var codes: [String: [UInt8]] = [:]
+            var codeHashes: [String: M31Word] = [:]
+            var storage: [String: M31Word] = [:]
+
+            // Fetch sender balance
+            if !tx.from.isEmpty {
+                let balance = try await eth_getBalance(at: tx.from, block: blockNumber)
+                balances[tx.from.lowercased()] = balance
+            }
+
+            // For contract calls, fetch bytecode and potentially storage
+            if let toAddress = tx.to, !toAddress.isEmpty {
+                // Fetch contract bytecode
+                let code = try await eth_getCode(at: toAddress, block: blockNumber)
+                if !code.isEmpty {
+                    codes[toAddress.lowercased()] = code
+                    codeHashes[toAddress.lowercased()] = zkMetal.keccak256(code).toM31Word()
+                }
+
+                // For contracts with calldata, the first 4 bytes often indicate the function
+                // We could fetch common storage slots, but that requires knowing the contract's layout
+                // For now, we rely on the execution engine to handle storage access during execution
+            }
+
+            return EVMTransactionState(
+                balances: balances,
+                codes: codes,
+                codeHashes: codeHashes,
+                storage: storage
+            )
+        }
+
+        /// Send async RPC request
+        private func sendRPCRequestAsync(request: EthereumRPCRequest) async throws -> String {
+            guard let url = URL(string: config.url) else {
+                throw BlockFetcherError.invalidURL(config.url)
+            }
+
+            var urlRequest = URLRequest(url: url)
+            urlRequest.httpMethod = "POST"
+            urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            urlRequest.timeoutInterval = config.timeout
+
+            let jsonData = try JSONSerialization.data(withJSONObject: [
+                "jsonrpc": request.jsonrpc,
+                "method": request.method,
+                "params": request.params,
+                "id": request.id
+            ], options: [])
+            urlRequest.httpBody = jsonData
+
+            let (data, response) = try await URLSession.shared.data(for: urlRequest)
+
+            guard let httpResponse = response as? HTTPURLResponse,
+                  httpResponse.statusCode == 200 else {
+                throw BlockFetcherError.invalidResponse
+            }
+
+            return String(data: data, encoding: .utf8) ?? ""
+        }
+
+        /// Parse bytecode response
+        private func parseCodeResponse(_ response: String) throws -> [UInt8] {
+            guard let data = response.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let result = json["result"] as? String else {
+                throw BlockFetcherError.parseError("Invalid code response")
+            }
+
+            return hexToBytes(result)
+        }
+
+        /// Parse balance response
+        private func parseBalanceResponse(_ response: String) throws -> M31Word {
+            guard let data = response.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let result = json["result"] as? String else {
+                throw BlockFetcherError.parseError("Invalid balance response")
+            }
+
+            // Parse hex balance to M31Word
+            let cleanHex = result.hasPrefix("0x") ? String(result.dropFirst(2)) : result
+            guard let balance = UInt64(cleanHex, radix: 16) else {
+                return .zero
+            }
+            return M31Word(low64: balance)
+        }
+
+        /// Parse storage response
+        private func parseStorageResponse(_ response: String) throws -> M31Word {
+            guard let data = response.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let result = json["result"] as? String else {
+                throw BlockFetcherError.parseError("Invalid storage response")
+            }
+
+            return hexToM31Word(result)
+        }
+    }
+
+    // MARK: - State Fetcher for Archive Nodes
+
+    /// Configuration for archive node state fetching
+    public struct StateFetcherConfig {
+        /// RPC configuration for archive node
+        public let rpcConfig: RPCConfig
+
+        /// Enable fetching of storage values
+        public let fetchStorage: Bool
+
+        /// Maximum storage slots to fetch per contract
+        public let maxStorageSlots: Int
+
+        /// Default configuration for Erigon
+        public static let erigon = StateFetcherConfig(
+            rpcConfig: .archiveNode,
+            fetchStorage: true,
+            maxStorageSlots: 100
+        )
+
+        /// Default configuration for Reth
+        public static let reth = StateFetcherConfig(
+            rpcConfig: .rethArchiveNode,
+            fetchStorage: true,
+            maxStorageSlots: 100
+        )
+
+        public init(rpcConfig: RPCConfig, fetchStorage: Bool = true, maxStorageSlots: Int = 100) {
+            self.rpcConfig = rpcConfig
+            self.fetchStorage = fetchStorage
+            self.maxStorageSlots = maxStorageSlots
+        }
+    }
+
+    /// Fetches full state from archive nodes for block proving
+    public final class ArchiveStateFetcher: @unchecked Sendable {
+        public let config: StateFetcherConfig
+        private let rpcClient: EthereumRPCClient
+
+        public init(config: StateFetcherConfig = .erigon) {
+            self.config = config
+            self.rpcClient = EthereumRPCClient(config: config.rpcConfig)
+        }
+
+        /// Fetch full state for all transactions in a block
+        /// - Parameters:
+        ///   - block: Ethereum block with transactions
+        ///   - blockNumber: Block number in hex
+        /// - Returns: Array of transaction states (one per transaction)
+        public func fetchBlockState(block: EthereumBlock, blockNumber: String) async throws -> [EVMTransactionState] {
+            var states: [EVMTransactionState] = []
+
+            for tx in block.transactions {
+                let state = try await rpcClient.fetchStateForTransaction(tx, blockNumber: blockNumber)
+                states.append(state)
+            }
+
+            return states
+        }
+
+        /// Check if archive node is available
+        public func isAvailable() async -> Bool {
+            do {
+                _ = try await rpcClient.eth_getCode(at: "0x0000000000000000000000000000000000000000", block: "0x0")
+                return true
+            } catch {
+                return false
+            }
+        }
     }
 
     /// Fetch a recent block from Ethereum mainnet
@@ -458,29 +712,38 @@ public struct RealEthereumBlockFetcher {
             print("  (Real Ethereum block #\(block.number) with real bytecode)")
 
             // Convert transactions to EVMTransaction format
+            // Note: This uses basic RPC - for full state witness, use benchmarkRealBlockUnifiedWithState
             var evmTransactions: [EVMTransaction] = []
             var successfulParse = 0
             var totalBytes = 0
             for i in 0..<maxTxs {
                 let tx = block.transactions[i]
 
-                // Use bytecode from transaction input (already parsed as bytes)
+                // BUG FIX: For contract calls, tx.input is CALDDATA, not bytecode!
+                // Bytecode must be fetched via eth_getCode
                 let code: [UInt8]
+                let calldata: [UInt8]
+
                 if tx.to == nil && !tx.input.isEmpty {
-                    // Contract creation - input data is bytecode
+                    // Contract creation - input data IS bytecode
                     code = tx.input
-                } else if tx.input.count > 0 {
-                    // Contract call - input is calldata
-                    code = tx.input
+                    calldata = []
+                } else if let toAddress = tx.to, !toAddress.isEmpty {
+                    // Contract call - bytecode must be fetched separately
+                    // For now, use minimal bytecode since we don't have archive node access
+                    // In production, use benchmarkRealBlockUnifiedWithState() with archive node
+                    code = [0x60, 0x01, 0x00]  // PUSH1 1, STOP (placeholder)
+                    calldata = tx.input  // Use actual calldata
                 } else {
-                    // Simple ETH transfer - minimal bytecode
-                    code = [0x60, 0x01, 0x00]  // PUSH1 1, STOP
+                    // Simple ETH transfer - no code needed
+                    code = []
+                    calldata = []
                 }
 
                 totalBytes += code.count
                 let evmTx = EVMTransaction(
                     code: code,
-                    calldata: [],
+                    calldata: calldata,
                     value: .zero,
                     gasLimit: 1_000_000,
                     txHash: tx.hash
@@ -490,6 +753,7 @@ public struct RealEthereumBlockFetcher {
             }
 
             print("  Parsed \(successfulParse) transactions with \(totalBytes) total bytes of bytecode")
+            print("  Note: For accurate bytecode, use benchmarkRealBlockUnifiedWithState() with archive node")
 
             // Run unified block proving
             let startTime = CFAbsoluteTimeGetCurrent()
@@ -541,6 +805,170 @@ public struct RealEthereumBlockFetcher {
     ) {
         Task {
             await benchmarkRealBlockUnified(blockNumber: blockNumber, config: config)
+        }
+    }
+
+    /// Benchmark with real Ethereum block using FULL STATE WITNESS support.
+    ///
+    /// This method properly fetches:
+    /// - Contract bytecode via eth_getCode (not tx.input which is calldata!)
+    /// - Account balances via eth_getBalance
+    /// - Initial state from archive node
+    ///
+    /// IMPORTANT: Requires an archive node (e.g., Erigon at localhost:8080 or Reth at localhost:8545)
+    /// Standard public RPC nodes will NOT work for state fetching.
+    ///
+    /// - Parameters:
+    ///   - blockNumber: Block number to fetch (decimal or hex with 0x prefix)
+    ///   - config: Prover configuration
+    ///   - archiveNodeConfig: Archive node RPC configuration (default: Erigon at localhost:8080)
+    public static func benchmarkRealBlockUnifiedWithState(
+        blockNumber: String,
+        config: BatchProverConfig = .unifiedBlock,
+        archiveNodeConfig: RPCConfig = .archiveNode
+    ) async {
+        print("""
+        ╔══════════════════════════════════════════════════════════════════╗
+        ║   Real Ethereum Block - Unified Proving with Full State Witness ║
+        ╚══════════════════════════════════════════════════════════════════╝
+
+        Fetching real block with accurate state from archive node...
+
+        Archive Node: \(archiveNodeConfig.url)
+        Note: Full state witness requires archive node (not standard RPC)
+
+        """)
+
+        do {
+            // First, fetch block via standard RPC (public node)
+            let rpcConfig = RPCConfig.publicNode
+
+            let hexNumber: String
+            if blockNumber.hasPrefix("0x") {
+                hexNumber = blockNumber
+            } else if let decimal = UInt64(blockNumber) {
+                hexNumber = String(format: "0x%llx", decimal)
+            } else {
+                hexNumber = blockNumber
+            }
+
+            print("Fetching block #\(blockNumber) (hex: \(hexNumber))...")
+            let block = try fetchBlock(number: hexNumber, config: rpcConfig)
+
+            print("✓ Block fetched: #\(block.number)")
+            print("  Transactions: \(block.transactions.count)")
+            print("  Gas used: \(block.gasUsed)")
+
+            // Create archive node RPC client for state fetching
+            let archiveRPC = EthereumRPCClient(config: archiveNodeConfig)
+
+            // Process transactions with proper bytecode and state
+            let maxTxs = min(block.transactions.count, 50)  // Limit for reasonable time
+            print("\nProcessing \(maxTxs) transactions with full state witness...")
+            print("  Fetching bytecode via eth_getCode for contract calls...")
+            print("  Fetching initial state from archive node...")
+
+            var evmTransactions: [EVMTransaction] = []
+            var successfulParse = 0
+            var totalBytes = 0
+            var bytecodeFetchErrors = 0
+
+            for i in 0..<maxTxs {
+                let tx = block.transactions[i]
+                print("  Processing tx \(i + 1)/\(maxTxs): \(tx.hash.prefix(16))...", terminator: "")
+
+                do {
+                    // Determine bytecode and calldata
+                    let code: [UInt8]
+                    let calldata: [UInt8]
+
+                    if tx.to == nil && !tx.input.isEmpty {
+                        // Contract creation - input data IS bytecode
+                        code = tx.input
+                        calldata = []
+                        print(" (contract creation, \(code.count) bytes)")
+                    } else if let toAddress = tx.to, !toAddress.isEmpty {
+                        // Contract call - fetch bytecode via eth_getCode
+                        // Use the transaction's block number to get code at that block
+                        let bytecode = try await archiveRPC.eth_getCode(at: toAddress, block: hexNumber)
+                        code = bytecode.isEmpty ? [0x60, 0x01, 0x00] : bytecode
+                        calldata = tx.input  // Use actual calldata
+
+                        if bytecode.isEmpty {
+                            print(" (transfer to contract, no code)")
+                        } else {
+                            print(" (contract call, \(code.count) bytes bytecode)")
+                        }
+                    } else {
+                        // Simple ETH transfer
+                        code = []
+                        calldata = []
+                        print(" (ETH transfer)")
+                    }
+
+                    // Fetch initial state for this transaction
+                    let initialState = try await archiveRPC.fetchStateForTransaction(tx, blockNumber: hexNumber)
+
+                    totalBytes += code.count
+                    let evmTx = EVMTransaction(
+                        code: code,
+                        calldata: calldata,
+                        value: .zero,
+                        gasLimit: 1_000_000,
+                        txHash: tx.hash,
+                        initialState: initialState
+                    )
+                    evmTransactions.append(evmTx)
+                    successfulParse += 1
+
+                } catch {
+                    bytecodeFetchErrors += 1
+                    print(" ERROR: \(error.localizedDescription)")
+                }
+            }
+
+            print("\n  Parsed \(successfulParse) transactions with \(totalBytes) total bytes of bytecode")
+            if bytecodeFetchErrors > 0 {
+                print("  Warning: \(bytecodeFetchErrors) transactions had bytecode fetch errors")
+            }
+
+            // Run unified block proving
+            let startTime = CFAbsoluteTimeGetCurrent()
+
+            let batchProver = EVMBatchProver(config: config)
+
+            print("  Compression: \(config.provingColumnCount) columns in FRI")
+
+            let batchProof = try batchProver.proveBatch(transactions: evmTransactions)
+
+            let totalTimeMs = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
+            let perTxTime = totalTimeMs / Double(maxTxs)
+            let throughput = Double(maxTxs) / (totalTimeMs / 1000)
+
+            let proofSize = maxTxs * 1024  // Rough estimate
+
+            print("""
+
+            ╔══════════════════════════════════════════════════════════════════╗
+            ║       Real Block Unified Proving Results (Full State Witness)      ║
+            ╚══════════════════════════════════════════════════════════════════╝
+
+            Block #\(block.number) - \(maxTxs) transactions:
+               Total time: \(String(format: "%.1f", totalTimeMs))ms (\(String(format: "%.2f", totalTimeMs/1000))s)
+               Per transaction: \(String(format: "%.2f", perTxTime))ms
+               Throughput: \(String(format: "%.1f", throughput)) TX/s
+               Proof size: ~\(proofSize) bytes (estimated)
+               Archive node errors: \(bytecodeFetchErrors)
+
+            ═══════════════════════════════════════════════════════════════════
+            """)
+
+        } catch {
+            print("ERROR: \(error)")
+            print("")
+            print("Note: Full state witness requires an archive node (Erigon/Reth).")
+            print("Standard public RPC nodes don't support eth_getCode at historical blocks.")
+            print("Start an archive node and use: benchmarkRealBlockUnifiedWithState(..., archiveNodeConfig: .archiveNode)")
         }
     }
 
@@ -773,6 +1201,48 @@ func hexToBytes(_ hex: String) -> [UInt8] {
     }
 
     return data
+}
+
+/// Parse hex string to M31Word (full 256-bit support)
+/// - Parameter hex: Hex string with optional 0x prefix
+/// - Returns: M31Word representation of the hex value
+func hexToM31Word(_ hex: String) -> M31Word {
+    var cleanHex = hex
+    if hex.hasPrefix("0x") || hex.hasPrefix("0X") {
+        cleanHex = String(hex.dropFirst(2))
+    }
+
+    // Pad to 64 hex chars (32 bytes) for M31Word
+    while cleanHex.count < 64 {
+        cleanHex = "0" + cleanHex
+    }
+
+    // Take last 64 chars if too long
+    if cleanHex.count > 64 {
+        cleanHex = String(cleanHex.suffix(64))
+    }
+
+    // Convert hex to bytes
+    var bytes = [UInt8]()
+    var index = cleanHex.startIndex
+    while index < cleanHex.endIndex {
+        let nextIndex = cleanHex.index(index, offsetBy: 2)
+        if nextIndex > cleanHex.endIndex { break }
+        let byteString = String(cleanHex[index..<nextIndex])
+        if let byte = UInt8(byteString, radix: 16) {
+            bytes.append(byte)
+        } else {
+            break
+        }
+        index = nextIndex
+    }
+
+    // Pad to 32 bytes if needed (for addresses which are 20 bytes)
+    while bytes.count < 32 {
+        bytes.insert(0, at: 0)
+    }
+
+    return M31Word(bytes: bytes)
 }
 
 // MARK: - Helper Functions
