@@ -60,9 +60,10 @@ Fetch blocks from Ethereum mainnet and generate STARK proofs in real-time:
 
 ```bash
 # Prove blocks against mainnet
-./ZoltraakProver real-block-unified <block_number> standard
-./ZoltraakProver real-block-unified <block_number> balanced
-./ZoltraakProver real-block-unified <block_number> ultra
+./ZoltraakProver real-block-unified <block_number> standard  # 32 columns, ~7-9s (recommended)
+./ZoltraakProver real-block-unified <block_number> balanced  # 24 columns, ~4-6s
+./ZoltraakProver real-block-unified <block_number> ultra    # 16 columns, ~1-2s
+./ZoltraakProver real-block-unified <block_number> full     # 180 columns, ~18s, max security
 
 # Performance tracking
 # - Standard: ~7-9s per block (full security)
@@ -105,9 +106,15 @@ The EVM trace uses **180 columns** to capture execution state:
 | GPU Batch Merkle | 201x speedup vs CPU |
 | GPU Leaf Hash | 83x speedup |
 | GPU FRI | 22.8ms per fold |
-| Real blocks (standard) | ~7-9s/block |
-| Real blocks (balanced) | ~4-6s/block |
-| Real blocks (ultra) | ~1-2s/block |
+
+### Proving Modes
+
+| Mode | Columns | Time | Security | Use Case |
+|------|---------|------|----------|----------|
+| **Ultra** | 16 | ~1-2s | ~20-30 bits | Testing/dev only |
+| **Balanced** | 24 | ~4-6s | ~40 bits | Fast production |
+| **Standard** | 32 | ~7-9s | ~60 bits | Recommended production |
+| **Full** | 180 | ~18s | ~100+ bits | Maximum security |
 
 ### Phase Breakdown (111 tx block, standard mode)
 
