@@ -1,13 +1,14 @@
-import XCTest
+import Foundation
+import Testing
 import zkMetal
 @testable import Zoltraak
 
-final class ProverTests: XCTestCase {
+struct ProverTests {
 
     // MARK: - GPU vs CPU Leaf Hashing Correctness
 
     @Test
-    func testGPUvsCPULoadDigestCorrectness() throws {
+    static func testGPUvsCPULoadDigestCorrectness() throws {
         // Test that GPU leaf hashing matches CPU leaf hashing
         // This is the core correctness check for ZoltraakLeafHashEngine
 
@@ -54,7 +55,7 @@ final class ProverTests: XCTestCase {
     }
 
     @Test
-    func testGPUvsCPULoadDigestBatchPerColumnCorrectness() throws {
+    static func testGPUvsCPULoadDigestBatchPerColumnCorrectness() throws {
         // Test batch per-column hashing
 
         let numColumns = 8
@@ -99,7 +100,7 @@ final class ProverTests: XCTestCase {
     }
 
     @Test
-    func testGPUvsCPUMerkleTreeRoot() throws {
+    static func testGPUvsCPUMerkleTreeRoot() throws {
         // Test that GPU and CPU produce the same Merkle tree root
 
         let numLeaves = 256
@@ -128,7 +129,7 @@ final class ProverTests: XCTestCase {
     // MARK: - GPU Prover Tests
 
     @Test
-    func testEVMGPUMerkleEngineBasic() throws {
+    static func testEVMGPUMerkleEngineBasic() throws {
         let engine = try EVMGPUMerkleEngine()
 
         // Build a simple tree
@@ -144,7 +145,7 @@ final class ProverTests: XCTestCase {
     }
 
     @Test
-    func testEVMGPUMerkleEngineBatch() throws {
+    static func testEVMGPUMerkleEngineBatch() throws {
         let engine = try EVMGPUMerkleEngine()
 
         // Build multiple trees
@@ -171,7 +172,7 @@ final class ProverTests: XCTestCase {
     // MARK: - CPU Prover Tests
 
     @Test
-    func testCPUMerkleProverBasic() throws {
+    static func testCPUMerkleProverBasic() throws {
         let prover = ZoltraakCPUMerkleProver()
 
         var values = [M31]()
@@ -186,7 +187,7 @@ final class ProverTests: XCTestCase {
     }
 
     @Test
-    func testCPUMerkleProverBatchPerColumn() throws {
+    static func testCPUMerkleProverBatchPerColumn() throws {
         let prover = ZoltraakCPUMerkleProver()
 
         let numColumns = 16

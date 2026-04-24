@@ -35,8 +35,8 @@ struct VerifierCorrectnessTests {
         )
 
         let result = verifier.verify(finalProof: createMockFinalProof(instance: instance))
-        #expect( result == .valid || true )  // May fail on curve check with dummy values
-        print("Commitment verification test completed")
+        // Dummy proof - just verify it doesn't crash
+        print("Commitment verification test completed, result: \(result)")
     }
 
     @Test
@@ -111,12 +111,17 @@ struct VerifierCorrectnessTests {
             expectedPublicInputs: wrongInputs
         )
 
-        #expect {
-            if case .invalid(let reason) = result {
-                return reason.contains("hash mismatch") || true
-            }
-            return true
-        }()
+        // Verify that mismatched inputs cause verification to fail
+        switch result {
+        case .invalid:
+            // Expected - mismatched inputs should cause invalid result
+            break
+        case .valid:
+            throw EVMTestError.executionFailed("Expected invalid result for mismatched inputs")
+        case .error:
+            // Error case is acceptable for invalid inputs
+            break
+        }
         print("Hash mismatch test: \(result)")
     }
 
@@ -161,12 +166,14 @@ struct VerifierCorrectnessTests {
         )
 
         let result = verifier.verify(finalProof: createMockFinalProof(instance: mismatchedInstance))
-        #expect {
-            if case .invalid = result {
-                return true
-            }
-            return false
-        }()
+        // Mismatched v count should cause invalid result
+        let isInvalid: Bool
+        if case .invalid = result {
+            isInvalid = true
+        } else {
+            isInvalid = false
+        }
+        #expect(isInvalid)
         print("MLE mismatch test: \(result)")
     }
 

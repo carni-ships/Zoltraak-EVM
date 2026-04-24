@@ -11,16 +11,25 @@ import zkMetal
 
 struct IVCIntegrationTests {
 
+    // MARK: - Field Function Aliases (to resolve zkMetal vs Zoltraak ambiguity)
+
+    // swift-format-ignore
+    private static func isZero(_ a: Fr) -> Bool { zkMetal.frIsZero(a) }
+    private static func isOdd(_ a: Fr) -> Bool { frIsOdd(a) }
+    private static func add(_ a: Fr, _ b: Fr) -> Fr { zkMetal.frAdd(a, b) }
+    private static func neg(_ a: Fr) -> Fr { zkMetal.frNeg(a) }
+    private static func sub(_ a: Fr, _ b: Fr) -> Fr { zkMetal.frSub(a, b) }
+
     // MARK: - IVC State Tests
 
     @Test
-    func testIVCStateInitialization() throws {
+    static func testIVCStateInitialization() throws {
         let state = CircleSTARKIVCState()
 
-        #expect(frIsZero(state.accumulatedRoot))
+        #expect(isZero(state.accumulatedRoot))
         #expect(state.blockCount == 0)
         #expect(state.lastBlockNumber == 0)
-        #expect(frIsZero(state.proofChainHash))
+        #expect(isZero(state.proofChainHash))
 
         print("Initial IVC state:")
         print("  - Accumulated root: \(frToInt(state.accumulatedRoot))")
@@ -28,7 +37,7 @@ struct IVCIntegrationTests {
     }
 
     @Test
-    func testIVCStateNext() throws {
+    static func testIVCStateNext() throws {
         var state = CircleSTARKIVCState()
 
         let traceRoot = frFromInt(12345)
@@ -36,8 +45,8 @@ struct IVCIntegrationTests {
 
         #expect(newState.blockCount == 1)
         #expect(newState.lastBlockNumber == 1)
-        #expect(!frIsZero(newState.accumulatedRoot))
-        #expect(!frIsZero(newState.proofChainHash))
+        #expect(!isZero(newState.accumulatedRoot))
+        #expect(!isZero(newState.proofChainHash))
 
         print("IVC state after first step:")
         print("  - Block count: \(newState.blockCount)")
@@ -45,7 +54,7 @@ struct IVCIntegrationTests {
     }
 
     @Test
-    func testIVCStateChaining() throws {
+    static func testIVCStateChaining() throws {
         var state = CircleSTARKIVCState()
 
         // Chain several steps
@@ -56,7 +65,7 @@ struct IVCIntegrationTests {
 
         #expect(state.blockCount == 5)
         #expect(state.lastBlockNumber == 5)
-        #expect(!frIsZero(state.proofChainHash))
+        #expect(!isZero(state.proofChainHash))
 
         print("IVC state after 5 steps: block count = \(state.blockCount)")
     }
@@ -64,7 +73,7 @@ struct IVCIntegrationTests {
     // MARK: - IVC Engine Tests
 
     @Test
-    func testIVCEngineInitialization() throws {
+    static func testIVCEngineInitialization() throws {
         let config = EVMCircleSTARKIVC.Config(
             numTraceColumns: 180,
             numProvingColumns: 32,
@@ -86,7 +95,7 @@ struct IVCIntegrationTests {
     }
 
     @Test
-    func testIVCEngineStepFolding() throws {
+    static func testIVCEngineStepFolding() throws {
         let engine = try EVMCircleSTARKIVC(config: .default)
 
         // Create a mock proof (simplified for testing)
@@ -111,7 +120,7 @@ struct IVCIntegrationTests {
     }
 
     @Test
-    func testIVCMultipleStepFolding() throws {
+    static func testIVCMultipleStepFolding() throws {
         let engine = try EVMCircleSTARKIVC(config: .default)
 
         // Chain several steps
@@ -134,7 +143,7 @@ struct IVCIntegrationTests {
     }
 
     @Test
-    func testIVCVerify() throws {
+    static func testIVCVerify() throws {
         let engine = try EVMCircleSTARKIVC(config: .default)
 
         // Before any steps
@@ -155,7 +164,7 @@ struct IVCIntegrationTests {
     }
 
     @Test
-    func testIVCDiagnostics() throws {
+    static func testIVCDiagnostics() throws {
         let engine = try EVMCircleSTARKIVC(config: .highSecurity)
 
         // Add a few steps
@@ -183,7 +192,7 @@ struct IVCIntegrationTests {
     // MARK: - CycleFold Tests
 
     @Test
-    func testCycleFoldFinalizerInitialization() throws {
+    static func testCycleFoldFinalizerInitialization() throws {
         let finalizer = EVMCycleFoldFinalizer(config: .default)
 
         #expect(finalizer != nil)
@@ -191,7 +200,7 @@ struct IVCIntegrationTests {
     }
 
     @Test
-    func testCycleFoldDeferOperation() throws {
+    static func testCycleFoldDeferOperation() throws {
         let finalizer = EVMCycleFoldFinalizer(config: .default)
 
         // Defer some operations
@@ -211,7 +220,7 @@ struct IVCIntegrationTests {
     }
 
     @Test
-    func testCycleFoldAccumulate() throws {
+    static func testCycleFoldAccumulate() throws {
         let finalizer = EVMCycleFoldFinalizer(config: .default)
 
         // Add operations
@@ -234,7 +243,7 @@ struct IVCIntegrationTests {
     }
 
     @Test
-    func testCycleFoldFinalize() throws {
+    static func testCycleFoldFinalize() throws {
         let finalizer = EVMCycleFoldFinalizer(config: .default)
         let ivcEngine = try EVMCircleSTARKIVC(config: .default)
 
@@ -258,7 +267,7 @@ struct IVCIntegrationTests {
         let cycleFoldProof = finalizer.finalize(ivcProof: ivcFinalProof)
 
         #expect(cycleFoldProof.numDeferredOps == 1)
-        #expect(!frIsZero(cycleFoldProof.grumpkinProof.accX))
+        #expect(!isZero(cycleFoldProof.grumpkinProof.accX))
         #expect(cycleFoldProof.bn254FinalCheck.verified)
 
         print("CycleFold finalization:")
@@ -269,58 +278,58 @@ struct IVCIntegrationTests {
     // MARK: - Field Arithmetic Tests
 
     @Test
-    func testFrAdd() throws {
+    static func testFrAdd() throws {
         let a = frFromInt(100)
         let b = frFromInt(200)
 
-        let result = frAdd(a, b)
+        let result = add(a, b)
 
         print("frAdd(100, 200) = \(frToInt(result))")
     }
 
     @Test
-    func testFrNeg() throws {
+    static func testFrNeg() throws {
         let a = frFromInt(100)
-        let result = frNeg(a)
+        let result = neg(a)
 
         print("frNeg(100) = \(frToInt(result))")
     }
 
     @Test
-    func testFrSub() throws {
+    static func testFrSub() throws {
         let a = frFromInt(200)
         let b = frFromInt(100)
 
-        let result = frSub(a, b)
+        let result = sub(a, b)
 
         print("frSub(200, 100) = \(frToInt(result))")
     }
 
     @Test
-    func testFrIsZero() throws {
+    static func testFrIsZero() throws {
         let zero = Fr.zero
         let nonZero = frFromInt(42)
 
-        #expect(frIsZero(zero))
-        #expect(!frIsZero(nonZero))
+        #expect(isZero(zero))
+        #expect(!isZero(nonZero))
 
         print("frIsZero tests passed")
     }
 
     @Test
-    func testFrIsOdd() throws {
+    static func testFrIsOdd() throws {
         let even = frFromInt(100)
         let odd = frFromInt(101)
 
-        #expect(!frIsOdd(even))
-        #expect(frIsOdd(odd))
+        #expect(!isOdd(even))
+        #expect(isOdd(odd))
 
         print("frIsOdd tests passed")
     }
 
     // MARK: - Helper Functions
 
-    private func createMockCircleSTARKProof() -> CircleSTARKProof {
+    private static func createMockCircleSTARKProof() -> CircleSTARKProof {
         // Create a minimal mock proof for testing
         // In production, this would come from the actual prover
         let traceCommitments: [[UInt8]] = [[UInt8](repeating: 0, count: 32)]
