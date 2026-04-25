@@ -128,10 +128,17 @@ public func runLiveProvingMode(
 
         let proveStart = CFAbsoluteTimeGetCurrent()
 
-        // Suppress stdout during proving in quiet mode to avoid verbose logs
-        let originalStdout = FileHandle.standardOutput
+        // Suppress stdout/stderr during proving in quiet mode to avoid verbose logs
+        var savedStdoutFd: Int32 = -1
+        var savedStderrFd: Int32 = -1
         if quiet {
-            freopen("/dev/null", "w", stdout)
+            fflush(stdout)
+            fflush(stderr)
+            savedStdoutFd = Darwin.dup(STDOUT_FILENO)
+            savedStderrFd = Darwin.dup(STDERR_FILENO)
+            let devNull = Darwin.fopen("/dev/null", "w")
+            Darwin.dup2(fileno(devNull), STDOUT_FILENO)
+            Darwin.dup2(fileno(devNull), STDERR_FILENO)
         }
 
         let animation = ProvingAnimation(message: "Proving block #\(blockNum)...")
@@ -142,10 +149,14 @@ public func runLiveProvingMode(
 
             let proof = try batchProver.proveBatch(transactions: evmTransactions, quiet: quiet)
 
-            // Restore stdout before printing results
-            if quiet {
+            // Restore stdout/stderr before printing results
+            if quiet && savedStdoutFd >= 0 {
                 fflush(stdout)
-                dup2(originalStdout.fileDescriptor, STDOUT_FILENO)
+                fflush(stderr)
+                Darwin.dup2(savedStdoutFd, STDOUT_FILENO)
+                Darwin.dup2(savedStderrFd, STDERR_FILENO)
+                Darwin.close(savedStdoutFd)
+                Darwin.close(savedStderrFd)
             }
 
             animation.stop(success: true, finalMessage: "Block #\(blockNum) proved in \(String(format: "%.1f", (CFAbsoluteTimeGetCurrent() - proveStart) * 1000))ms")
@@ -225,10 +236,14 @@ public func runLiveProvingMode(
             }
 
         } catch {
-            // Restore stdout before printing error
-            if quiet {
+            // Restore stdout/stderr before printing error
+            if quiet && savedStdoutFd >= 0 {
                 fflush(stdout)
-                dup2(originalStdout.fileDescriptor, STDOUT_FILENO)
+                fflush(stderr)
+                Darwin.dup2(savedStdoutFd, STDOUT_FILENO)
+                Darwin.dup2(savedStderrFd, STDERR_FILENO)
+                Darwin.close(savedStdoutFd)
+                Darwin.close(savedStderrFd)
             }
             animation.stop(success: false, finalMessage: "Block #\(blockNum) failed")
             let proveTimeMs = (CFAbsoluteTimeGetCurrent() - proveStart) * 1000
@@ -358,10 +373,18 @@ public func runContinuousLiveProving(
 
         let proveStart = CFAbsoluteTimeGetCurrent()
 
-        // Suppress stdout during proving in quiet mode to avoid verbose logs
-        let originalStdout = FileHandle.standardOutput
+        // Suppress stdout/stderr before proving in quiet mode to avoid verbose logs
+        var savedStdoutFd: Int32 = -1
+        var savedStderrFd: Int32 = -1
         if quiet {
-            freopen("/dev/null", "w", stdout)
+            fflush(stdout)
+            fflush(stderr)
+            savedStdoutFd = Darwin.dup(STDOUT_FILENO)
+            savedStderrFd = Darwin.dup(STDERR_FILENO)
+            // Redirect both stdout and stderr to /dev/null
+            let devNull = Darwin.fopen("/dev/null", "w")
+            Darwin.dup2(fileno(devNull), STDOUT_FILENO)
+            Darwin.dup2(fileno(devNull), STDERR_FILENO)
         }
 
         let animation = ProvingAnimation(message: "Proving block #\(nextBlockToProve)...")
@@ -371,10 +394,14 @@ public func runContinuousLiveProving(
             let evmTransactions = blockData.toEVMTransactions()
             let proof = try batchProver.proveBatch(transactions: evmTransactions, quiet: quiet)
 
-            // Restore stdout before printing results
-            if quiet {
+            // Restore stdout/stderr before printing results
+            if quiet && savedStdoutFd >= 0 {
                 fflush(stdout)
-                dup2(originalStdout.fileDescriptor, STDOUT_FILENO)
+                fflush(stderr)
+                Darwin.dup2(savedStdoutFd, STDOUT_FILENO)
+                Darwin.dup2(savedStderrFd, STDERR_FILENO)
+                Darwin.close(savedStdoutFd)
+                Darwin.close(savedStderrFd)
             }
 
             animation.stop(success: true, finalMessage: "Block #\(nextBlockToProve) verified")
@@ -433,10 +460,14 @@ public func runContinuousLiveProving(
             }
 
         } catch {
-            // Restore stdout before printing error
-            if quiet {
+            // Restore stdout/stderr before printing error
+            if quiet && savedStdoutFd >= 0 {
                 fflush(stdout)
-                dup2(originalStdout.fileDescriptor, STDOUT_FILENO)
+                fflush(stderr)
+                Darwin.dup2(savedStdoutFd, STDOUT_FILENO)
+                Darwin.dup2(savedStderrFd, STDERR_FILENO)
+                Darwin.close(savedStdoutFd)
+                Darwin.close(savedStderrFd)
             }
             animation.stop(success: false, finalMessage: "Block #\(nextBlockToProve) failed")
             print("Block #\(nextBlockToProve): FAILED - \(error)")
