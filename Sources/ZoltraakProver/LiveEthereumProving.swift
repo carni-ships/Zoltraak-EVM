@@ -428,13 +428,22 @@ public func runContinuousLiveProving(
             var starkFailed = 0
 
             // Handle unified block proof vs transaction-level proofs
-            if let blockProof = proof.aggregatedProof, !blockProof.isEmpty {
-                // Unified block proof - proof was generated successfully
-                // Note: Full FRI verification requires prover transcript state,
-                // so we just verify the proof was generated (non-empty data)
-                // For full verification, use EVMVerifier with the prover's state
-                starkVerified = 1
-                starkFailed = 0
+            if let blockProofData = proof.aggregatedProof, !blockProofData.isEmpty {
+                // Unified block proof - verify structurally (full FRI requires prover state)
+                do {
+                    let gpuProof = try deserializeGPUProof(from: blockProofData)
+                    // Structural verification: check proof has non-empty commitments and queries
+                    if gpuProof.traceCommitments.count > 0 && gpuProof.queryResponses.count > 0 {
+                        starkVerified = 1
+                    } else {
+                        starkFailed = 1
+                    }
+                } catch {
+                    starkFailed = 1
+                    if !quiet {
+                        print("    UNIFIED VERIFY FAILED: \(error)")
+                    }
+                }
             } else if !proof.transactionProofs.isEmpty {
                 // Transaction-level proofs - verify each
                 for txProof in proof.transactionProofs {
@@ -469,14 +478,10 @@ public func runContinuousLiveProving(
             }
 
             if quiet {
-                if isUnified {
-                    print("#\(nextBlockToProve): \(starkVerified)/\(proofCount) STARK | prove \(String(format: "%.1f", proveTimeMs))ms | gen \(String(format: "%.0f", generatorThroughput)) tx/s")
-                } else {
-                    let verifierThroughput = totalTxCount > 0 && totalVerifyTimeMs > 0
-                        ? Double(totalTxCount) / (totalVerifyTimeMs / 1000)
-                        : 0
-                    print("#\(nextBlockToProve): \(starkVerified)/\(proofCount) STARK | prove \(String(format: "%.1f", proveTimeMs))ms | gen \(String(format: "%.0f", generatorThroughput)) tx/s | verify \(String(format: "%.0f", verifierThroughput)) tx/s")
-                }
+                let verifierThroughput = totalTxCount > 0 && totalVerifyTimeMs > 0
+                    ? Double(totalTxCount) / (totalVerifyTimeMs / 1000)
+                    : 0
+                print("#\(nextBlockToProve): \(starkVerified)/\(proofCount) STARK | prove \(String(format: "%.1f", proveTimeMs))ms | gen \(String(format: "%.0f", generatorThroughput)) tx/s | verify \(String(format: "%.0f", verifierThroughput)) tx/s")
             } else {
                 print("Block #\(nextBlockToProve): STARK \(starkVerified)/\(proofCount) | prove \(String(format: "%.1f", proveTimeMs))ms | verify \(String(format: "%.2f", verifyTimeMs))ms | gen \(String(format: "%.0f", generatorThroughput)) tx/s | \(String(format: "%.1f", realtimePct))% realtime")
             }
