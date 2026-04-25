@@ -798,10 +798,12 @@ public final class ZoltraakBlockProver {
         var friMs: Double = 0
 
         // Check if we should use GPU prover
-        // GPU prover: use GPU Circle STARK for large composition polynomials
+        // GPU prover: use GPU Circle STARK when GPU is available
+        // Lowered threshold from 65536 to 16384 to work with logBlowup=1 configurations
+        // (ultraFast mode uses logBlowup=1 which gives evaluationDomain=32768 for 256 transactions)
         let compositionSize = traceLDEs.isEmpty ? 0 : traceLDEs[0].count
         let gpuAvailable = gpuProver?.gpuAvailable ?? false
-        let useGPUProver = gpuAvailable && compositionSize >= 65536
+        let useGPUProver = gpuAvailable && compositionSize >= 16384
 
         if useGPUProver {
             print("[BlockProver] Using GPU Circle STARK prover")
