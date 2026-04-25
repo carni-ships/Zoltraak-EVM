@@ -265,9 +265,9 @@ public final class EVMCircleSTARKIVC: Sendable {
 
         // Build CCS with identity matrices (simplified)
         // Identity matrices should be m×n (constraints × vars), not square
-        let matrixA = SparseMatrix.identity(rows: numConstraints, cols: numVars)
-        let matrixB = SparseMatrix.identity(rows: numConstraints, cols: numVars)
-        let matrixC = SparseMatrix.identity(rows: numConstraints, cols: numVars)
+        let matrixA = SparseMatrix.identity(numVars)
+        let matrixB = SparseMatrix.identity(numVars)
+        let matrixC = SparseMatrix.identity(numVars)
 
         return CCSInstance(
             m: numConstraints,
