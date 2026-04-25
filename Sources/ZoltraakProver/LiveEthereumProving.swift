@@ -429,11 +429,10 @@ public func runContinuousLiveProving(
 
             // Handle unified block proof vs transaction-level proofs
             if let blockProofData = proof.aggregatedProof, !blockProofData.isEmpty {
-                // Unified block proof - verify structurally (full FRI requires prover state)
+                // Unified block proof - do full Merkle path verification
                 do {
                     let gpuProof = try deserializeGPUProof(from: blockProofData)
-                    // Structural verification: check proof has non-empty commitments and queries
-                    if gpuProof.traceCommitments.count > 0 && gpuProof.queryResponses.count > 0 {
+                    if verifier.verify(gpuProof) {
                         starkVerified = 1
                     } else {
                         starkFailed = 1
