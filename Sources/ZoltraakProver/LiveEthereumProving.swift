@@ -219,19 +219,31 @@ public func runLiveProvingMode(
 
             let realtimePct = Double(onTimeCount) / Double(successfulBlocks) * 100
 
+            // Calculate throughputs
+            let generatorThroughput = Double(blockData.txCount) / (proveTimeMs / 1000)
+
             // Count proofs based on mode
             let proofCount: Int
-            if let blockProof = proof.aggregatedProof, !blockProof.isEmpty {
+            let isUnified = proof.aggregatedProof != nil && !proof.aggregatedProof!.isEmpty
+            if isUnified {
                 proofCount = 1  // Unified block proof
             } else {
                 proofCount = proof.transactionProofs.count
             }
 
             if quiet {
-                print("Block #\(blockNum): \(starkVerified)/\(proofCount) STARK | \(String(format: "%.1f", proveTimeMs))ms prove | \(String(format: "%.1f", realtimePct))% realtime")
+                if isUnified {
+                    print("Block #\(blockNum): \(starkVerified)/\(proofCount) STARK | prove \(String(format: "%.1f", proveTimeMs))ms | gen \(String(format: "%.0f", generatorThroughput)) tx/s")
+                } else {
+                    let verifierThroughput = totalTxCount > 0 && totalVerifyTimeMs > 0
+                        ? Double(totalTxCount) / (totalVerifyTimeMs / 1000)
+                        : 0
+                    print("Block #\(blockNum): \(starkVerified)/\(proofCount) STARK | prove \(String(format: "%.1f", proveTimeMs))ms | gen \(String(format: "%.0f", generatorThroughput)) tx/s | verify \(String(format: "%.0f", verifierThroughput)) tx/s")
+                }
             } else {
                 print("  PROOF GENERATED (\(String(format: "%.1f", proveTimeMs))ms)")
                 print("  STARK Verification: \(starkVerified)/\(proofCount) valid (\(String(format: "%.2f", verifyTimeMs))ms)")
+                print("  Generator: \(String(format: "%.0f", generatorThroughput)) tx/s")
                 print("  \(onTime ? "ON TIME" : "LATE") | Realtime rate: \(String(format: "%.1f", realtimePct))%")
             }
 
@@ -443,20 +455,30 @@ public func runContinuousLiveProving(
             }
 
             let realtimePct = Double(totalOnTime) / Double(totalSuccessful) * 100
-            let throughput = Double(totalTxCount) / ((CFAbsoluteTimeGetCurrent() - startTime) / 1000)
+
+            // Calculate throughputs
+            let generatorThroughput = Double(blockData.txCount) / (proveTimeMs / 1000)
 
             // Handle unified vs transaction counts for reporting
             let proofCount: Int
-            if let blockProof = proof.aggregatedProof, !blockProof.isEmpty {
+            let isUnified = proof.aggregatedProof != nil && !proof.aggregatedProof!.isEmpty
+            if isUnified {
                 proofCount = 1  // Unified block proof is 1 proof
             } else {
                 proofCount = proof.transactionProofs.count
             }
 
             if quiet {
-                print("#\(nextBlockToProve): \(starkVerified)/\(proofCount) STARK | \(String(format: "%.1f", proveTimeMs))ms | \(String(format: "%.1f", realtimePct))% realtime | \(String(format: "%.1f", throughput)) tx/s")
+                if isUnified {
+                    print("#\(nextBlockToProve): \(starkVerified)/\(proofCount) STARK | prove \(String(format: "%.1f", proveTimeMs))ms | gen \(String(format: "%.0f", generatorThroughput)) tx/s")
+                } else {
+                    let verifierThroughput = totalTxCount > 0 && totalVerifyTimeMs > 0
+                        ? Double(totalTxCount) / (totalVerifyTimeMs / 1000)
+                        : 0
+                    print("#\(nextBlockToProve): \(starkVerified)/\(proofCount) STARK | prove \(String(format: "%.1f", proveTimeMs))ms | gen \(String(format: "%.0f", generatorThroughput)) tx/s | verify \(String(format: "%.0f", verifierThroughput)) tx/s")
+                }
             } else {
-                print("Block #\(nextBlockToProve): STARK \(starkVerified)/\(proofCount) | prove \(String(format: "%.1f", proveTimeMs))ms | verify \(String(format: "%.2f", verifyTimeMs))ms | \(String(format: "%.1f", realtimePct))% realtime | \(String(format: "%.1f", throughput)) tx/s")
+                print("Block #\(nextBlockToProve): STARK \(starkVerified)/\(proofCount) | prove \(String(format: "%.1f", proveTimeMs))ms | verify \(String(format: "%.2f", verifyTimeMs))ms | gen \(String(format: "%.0f", generatorThroughput)) tx/s | \(String(format: "%.1f", realtimePct))% realtime")
             }
 
         } catch {
