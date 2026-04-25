@@ -25,9 +25,7 @@ let testFilter = args.count > 2 ? args[2] : nil
 let quietMode = args.contains("-q") || args.contains("--quiet")
 switch mode {
 case "eth-live", "eth-live-cont", "benchmarks", "quick", "gpu", "e2e", "opcode":
-    if !quietMode {
-        printZoltraakHeader()
-    }
+    printZoltraakHeader()  // Always show banner
 default:
     break
 }
