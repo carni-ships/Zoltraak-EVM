@@ -143,12 +143,12 @@ public final class EVMGPUCircleSTARKProverEngine {
             )
             self.cpuConstraintEngine = try? EVMGPUConstraintEngine(logTraceLength: 14)
 
-            // Initialize GPU FRI engine (Metal shaders are now fixed)
+            // Initialize GPU FRI engine
             do {
                 self.friEngine = try GPUCircleFRIProverEngine()
                 self.friEngineReady = true
-                            } catch {
-                                self.friEngineReady = true
+            } catch {
+                self.friEngineReady = false
             }
         }
     }
