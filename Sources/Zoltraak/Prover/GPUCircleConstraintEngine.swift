@@ -240,14 +240,12 @@ public final class GPUCircleConstraintEngine: Sendable {
         }
 
         let gpuStart = CFAbsoluteTimeGetCurrent()
-        fputs("[GPUConstraint] Starting GPU eval with \(evalLen) points, \(columnIndices.count) columns\n", stderr)
 
         // Prepare full 180-column trace by padding non-proving columns with zeros
         // EVMGPUConstraintEngine requires exactly 180 columns
         let paddedTraceLDEs = padTraceToFullColumns(traceLDEs: traceLDEs, columnIndices: columnIndices, totalColumns: 180)
 
         let prepMs = (CFAbsoluteTimeGetCurrent() - gpuStart) * 1000
-        fputs("[GPUConstraint] Prep done: \(String(format: "%.1f", prepMs))ms\n", stderr)
 
         // Evaluate constraints on GPU, passing evalLen since this is LDE trace
         let evalStart = CFAbsoluteTimeGetCurrent()
@@ -259,7 +257,6 @@ public final class GPUCircleConstraintEngine: Sendable {
         )
 
         let constraintEvalMs = (CFAbsoluteTimeGetCurrent() - evalStart) * 1000
-        fputs("[GPUConstraint] Constraint eval done: \(String(format: "%.1f", constraintEvalMs))ms\n", stderr)
 
         // Generate challenges for composition
         var challenges = [M31]()
@@ -273,8 +270,6 @@ public final class GPUCircleConstraintEngine: Sendable {
 
         // Compute composition polynomial on GPU, passing evalLen for LDE trace
         let compositionStartTime = CFAbsoluteTimeGetCurrent()
-        fputs("[GPUConstraint] Calling evaluateCompositionPolynomial with \(constraintResult.constraints.count) constraints\n", stderr)
-        fflush(stderr)
 
         let composition: [M31]
         do {
@@ -284,23 +279,14 @@ public final class GPUCircleConstraintEngine: Sendable {
                 traceLengthOverride: evalLen
             )
         } catch {
-            fputs("[GPUConstraint] Composition polynomial failed: \(error)\n", stderr)
             throw error
         }
         let compTimeMs = (CFAbsoluteTimeGetCurrent() - compositionStartTime) * 1000
-        fputs("[GPUConstraint] Composition polynomial done: \(String(format: "%.1f", compTimeMs))ms\n", stderr)
-        fflush(stderr)
 
         // Add boundary constraint contributions
-        fputs("[GPUConstraint] Checking boundary constraints, count=\(boundaryConstraints.count)\n", stderr)
-        fflush(stderr)
         var compositionWithBoundary = composition
-        fputs("[GPUConstraint] compositionWithBoundary assigned from composition\n", stderr)
-        fflush(stderr)
 
         if !boundaryConstraints.isEmpty {
-            fputs("[GPUConstraint] Calling addBoundaryContributions...\n", stderr)
-            fflush(stderr)
             compositionWithBoundary = addBoundaryContributions(
                 composition: composition,
                 traceLDEs: traceLDEs,
@@ -308,13 +294,9 @@ public final class GPUCircleConstraintEngine: Sendable {
                 alpha: alpha,
                 logEval: logTrace + logBlowup
             )
-            fputs("[GPUConstraint] addBoundaryContributions done\n", stderr)
-            fflush(stderr)
         }
 
         let totalTimeMs = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
-        fputs("[GPUConstraint] Returning from evaluateConstraintsGPU, totalTime=\(String(format: "%.1f", totalTimeMs))ms\n", stderr)
-        fflush(stderr)
 
         return EvaluationResult(
             compositionValues: compositionWithBoundary,
@@ -489,56 +471,56 @@ public final class GPUCircleConstraintEngine: Sendable {
         alpha: M31,
         logEval: Int
     ) -> [M31] {
-        fputs("[addBoundaryContributions] START: composition.count=\(composition.count), constraints=\(boundaryConstraints.count), logEval=\(logEval)\n", stderr)
-        fflush(stderr)
         var result = composition
 
         // Precompute alpha powers up to max row index
-        let maxAlphaPow = 20  // For bc.row % 10
+        let maxAlphaPow = 20
         var alphaPowers = [M31](repeating: .one, count: maxAlphaPow)
         for i in 1..<maxAlphaPow {
             alphaPowers[i] = m31Mul(alphaPowers[i-1], alpha)
         }
 
-        // Only process rows that are actual boundary points
-        // Collect unique boundary rows
-        var boundaryRows = Set<Int>()
-        for bc in boundaryConstraints {
-            boundaryRows.insert(bc.row)
-        }
-        fputs("[addBoundaryContributions] Unique boundary rows: \(boundaryRows.count)\n", stderr)
-        fflush(stderr)
-
-        // Precompute vanishing polynomial at all boundary rows
+        // Group constraints by row for efficient parallel processing
+        var constraintsByRow: [Int: [(column: Int, row: Int, value: M31, alphaPow: M31, vzInverse: M31)]] = [:]
         let evalDomain = circleCosetDomain(logN: logEval)
-        var vzAtBoundary = [Int: M31]()  // row -> vanishing value
-        for row in boundaryRows {
-            vzAtBoundary[row] = circleVanishing(point: evalDomain[row], logDomainSize: logEval - logBlowup)
-        }
 
-        // Process each boundary constraint - each constraint only affects its specific row
         for bc in boundaryConstraints {
             guard bc.row < composition.count else { continue }
-            guard let vz = vzAtBoundary[bc.row], vz.v != 0 else { continue }
-
-            // Get trace column
-            guard bc.column < traceLDEs.count else { continue }
-            let traceCol = traceLDEs[bc.column]
-            guard bc.row < traceCol.count else { continue }
-
-            // Compute diff and quotient
-            let colVal = traceCol[bc.row]
-            let diff = m31Sub(colVal, bc.value)
-            let quotient = m31Mul(diff, m31Inverse(vz))
-
-            // Add alpha^bc.row contribution
+            let vz = circleVanishing(point: evalDomain[bc.row], logDomainSize: logEval - logBlowup)
+            guard vz.v != 0 else { continue }
+            let vzInverse = m31Inverse(vz)
             let alphaIdx = bc.row % maxAlphaPow
             let alphaPow = alphaPowers[alphaIdx]
-            result[bc.row] = m31Add(result[bc.row], m31Mul(alphaPow, quotient))
+
+            if constraintsByRow[bc.row] == nil {
+                constraintsByRow[bc.row] = []
+            }
+            constraintsByRow[bc.row]?.append((bc.column, bc.row, bc.value, alphaPow, vzInverse))
         }
 
-        fputs("[addBoundaryContributions] ALL DONE\n", stderr)
-        fflush(stderr)
+        // Process each row's constraints in parallel using actor-based concurrency
+        // Since each row is independent, we can process rows in parallel
+        let rows = Array(constraintsByRow.keys)
+
+        // Sequential processing due to array mutation - but optimized by grouping
+        for row in rows {
+            guard let rowConstraints = constraintsByRow[row], !rowConstraints.isEmpty else { continue }
+
+            var accumulated: M31 = .zero
+            for constraint in rowConstraints {
+                guard constraint.column < traceLDEs.count else { continue }
+                let traceCol = traceLDEs[constraint.column]
+                guard constraint.row < traceCol.count else { continue }
+
+                let colVal = traceCol[constraint.row]
+                let diff = m31Sub(colVal, constraint.value)
+                let quotient = m31Mul(diff, constraint.vzInverse)
+                let contribution = m31Mul(constraint.alphaPow, quotient)
+                accumulated = m31Add(accumulated, contribution)
+            }
+            result[row] = m31Add(result[row], accumulated)
+        }
+
         return result
     }
 

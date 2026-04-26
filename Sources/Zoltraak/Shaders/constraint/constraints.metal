@@ -706,3 +706,105 @@ kernel void evaluate_constraints_vectorized(
         constraints[outBase + i] = m31_zero();
     }
 }
+
+// =============================================================================
+// GPU Boundary Constraint Contributions
+// Adds boundary constraint contributions to composition polynomial
+// =============================================================================
+
+// Boundary constraint structure: [column, row, value, _] packed as M31
+struct BoundaryConstraint {
+    uint column;
+    uint row;
+    uint value;
+    uint padding;
+};
+
+// GPU kernel for adding boundary constraint contributions
+// Each thread processes one boundary constraint
+kernel void add_boundary_contributions(
+    device M31* composition             [[buffer(0)]],      // Composition polynomial (modified in place)
+    device const M31* traceColumns       [[buffer(1)]],      // Trace columns [numColumns x evalLen]
+    device const BoundaryConstraint* constraints [[buffer(2)]], // Boundary constraints
+    device const M31* alphaPowers      [[buffer(3)]],      // Precomputed alpha^row values
+    device const M31* vanishingValues  [[buffer(4)]],      // Precomputed vanishing at boundary rows
+    constant uint& numConstraints        [[buffer(5)]],       // Number of boundary constraints
+    constant uint& numColumns           [[buffer(6)]],       // Number of trace columns
+    constant uint& evalLen              [[buffer(7)]],       // Evaluation length
+    uint gid                             [[thread_position_in_grid]]
+) {
+    if (gid >= numConstraints) return;
+
+    BoundaryConstraint bc = constraints[gid];
+    uint col = bc.column;
+    uint row = bc.row;
+    M31 expectedValue = M31{bc.value};
+
+    // Bounds check
+    if (col >= numColumns || row >= evalLen) return;
+
+    // Get vanishing value at this boundary row
+    M31 vanishing = vanishingValues[gid];
+    if (vanishing.v == 0) return;  // Skip if vanishing is zero
+
+    // Get trace column and value at boundary row
+    M31 traceValue = traceColumns[col * evalLen + row];
+
+    // Compute diff = traceValue - expectedValue
+    M31 diff = m31_sub(traceValue, expectedValue);
+
+    // Compute quotient = diff / vanishing
+    // For M31, we need modular inverse
+    // Using Fermat's little theorem: a^-1 = a^(p-2) mod p
+    // But we precompute on CPU, so vanishingValues already contains inverse
+    M31 quotient = m31_mul(diff, vanishing);
+
+    // Get alpha^row
+    uint alphaIdx = row % 20;  // Precomputed alpha powers repeat every 20
+    M31 alphaPow = alphaPowers[alphaIdx];
+
+    // Compute contribution = alpha^row * quotient
+    M31 contribution = m31_mul(alphaPow, quotient);
+
+    // Add to composition polynomial
+    M31 currentComp = composition[row];
+    composition[row] = m31_add(currentComp, contribution);
+}
+
+// Variant that uses separate vanishing values buffer (row -> vanishing)
+kernel void add_boundary_contributions_v2(
+    device M31* composition             [[buffer(0)]],
+    device const M31* traceColumns       [[buffer(1)]],
+    device const BoundaryConstraint* constraints [[buffer(2)]],
+    device const M31* alphaPowers       [[buffer(3)]],
+    device const M31* vanishingTable     [[buffer(4)]],      // Table: row -> vanishing (already inverted)
+    device const uint* boundaryRowIndices [[buffer(5)]],     // Map: constraint idx -> row index in vanishing table
+    constant uint& numConstraints        [[buffer(6)]],
+    constant uint& numColumns           [[buffer(7)]],
+    constant uint& evalLen              [[buffer(8)]],
+    uint gid                             [[thread_position_in_grid]]
+) {
+    if (gid >= numConstraints) return;
+
+    BoundaryConstraint bc = constraints[gid];
+    uint col = bc.column;
+    uint row = bc.row;
+
+    if (col >= numColumns || row >= evalLen) return;
+
+    // Get vanishing from table using precomputed mapping
+    uint vanishingIdx = boundaryRowIndices[gid];
+    M31 vanishing = vanishingTable[vanishingIdx];
+    if (vanishing.v == 0) return;
+
+    M31 traceValue = traceColumns[col * evalLen + row];
+    M31 diff = m31_sub(traceValue, M31{bc.value});
+    M31 quotient = m31_mul(diff, vanishing);
+
+    uint alphaIdx = row % 20;
+    M31 alphaPow = alphaPowers[alphaIdx];
+    M31 contribution = m31_mul(alphaPow, quotient);
+
+    M31 currentComp = composition[row];
+    composition[row] = m31_add(currentComp, contribution);
+}
