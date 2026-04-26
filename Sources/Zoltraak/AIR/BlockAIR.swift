@@ -765,6 +765,17 @@ public struct BlockAIR: CircleAIR {
     public struct CommitResult {
         public let commitments: [M31Digest]
         public let trees: [[M31Digest]]
+        /// Optional combined GPU tree buffer for proof generation (all trees concatenated)
+        public let treeBuffer: MTLBuffer?
+        /// Number of leaves per tree (for tree buffer interpretation)
+        public let numLeaves: Int
+
+        public init(commitments: [M31Digest], trees: [[M31Digest]], treeBuffer: MTLBuffer? = nil, numLeaves: Int = 0) {
+            self.commitments = commitments
+            self.trees = trees
+            self.treeBuffer = treeBuffer
+            self.numLeaves = numLeaves
+        }
     }
 
     /// GPU-accelerated Merkle commitment

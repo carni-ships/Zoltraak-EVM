@@ -353,11 +353,11 @@ public final class EVMGPUCircleSTARKProverEngine {
 
         // Use precomputed commitments when available - no need to rebuild GPU trees
         // This saves ~800ms by skipping redundant GPU tree rebuilding
+        // GPU proofs will fall back to CPU path since we don't have tree buffers
         if let precomputed = precomputed, !precomputed.isEmpty {
             // If precomputed tree buffer is available, set it up for GPU proofs
             if let precomputedBuf = precomputedTreeBuffer, precomputedTreeNumLeaves > 0, let gpuEngine = gpuMerkleEngine {
                 // Reconstruct traceTreeBuffers from single combined buffer
-                // The buffer contains all trees concatenated: [tree0][tree1]...[treeN]
                 let nodeSize = 8
                 let treeNodeCount = 2 * precomputedTreeNumLeaves - 1
                 let numTrees = precomputed.count
