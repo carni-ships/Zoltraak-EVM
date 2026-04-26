@@ -354,6 +354,27 @@ public final class EVMGPUCircleSTARKProverEngine {
         // Use precomputed commitments when available - no need to rebuild GPU trees
         // This saves ~800ms by skipping redundant GPU tree rebuilding
         if let precomputed = precomputed, !precomputed.isEmpty {
+            // If precomputed tree buffer is available, set it up for GPU proofs
+            if let precomputedBuf = precomputedTreeBuffer, precomputedTreeNumLeaves > 0, let gpuEngine = gpuMerkleEngine {
+                // Reconstruct traceTreeBuffers from single combined buffer
+                // The buffer contains all trees concatenated: [tree0][tree1]...[treeN]
+                let nodeSize = 8
+                let treeNodeCount = 2 * precomputedTreeNumLeaves - 1
+                let numTrees = precomputed.count
+                var buffers: [MTLBuffer] = []
+                buffers.reserveCapacity(numTrees)
+                for i in 0..<numTrees {
+                    let offset = i * treeNodeCount * nodeSize * MemoryLayout<UInt32>.stride
+                    let length = treeNodeCount * nodeSize * MemoryLayout<UInt32>.stride
+                    if let subBuf = gpuEngine.device.makeBuffer(length: length, options: .storageModeShared) {
+                        memcpy(subBuf.contents(), precomputedBuf.contents().advanced(by: offset), length)
+                        buffers.append(subBuf)
+                    }
+                }
+                self.traceTreeBuffers = buffers
+                self.traceTreeNumLeaves = precomputedTreeNumLeaves
+                print("[GPU Prover] commitTraceColumns: using precomputed tree buffer (\(numTrees) trees)")
+            }
             let commitTime = CFAbsoluteTimeGetCurrent() - commitT0
             print("[GPU Prover] commitTraceColumns: using \(precomputed.count) precomputed commitments (skip GPU tree rebuild)")
             return (precomputed, [], commitTime)
