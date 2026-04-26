@@ -478,13 +478,13 @@ public final class EVMGPUCircleSTARKProverEngine {
 
         // Use GPU constraint engine when available - but only for reasonable sizes
         // GPU engine may hang for very large traces due to memory pressure
-        // For column subset mode (16 cols), CPU parallel is faster than GPU
+        // For column subset mode (16 cols), CPU parallel is faster than GPU upload overhead
         if let gpuConstraint = gpuConstraintEngine {
             let evalLen = traceLDEs.first?.count ?? 0
             let numCols = min(columnIndices.count, 32)  // Only FRI-proving columns
             let canUseGPU = gpuConstraint.canHandle(traceLength: evalLen, numColumns: numCols)
             let useColumnSubset = columnIndices.count < 180
-            // Use CPU for column subset mode - parallel processing is faster than GPU overhead
+            // Use CPU for column subset mode - GPU 180-col upload (47MB) dominates over CPU parallel
             let shouldUseGPU = canUseGPU && !useColumnSubset
             print("[GPU Prover] evaluateConstraints: evalLen=\(evalLen), numCols=\(numCols), subset=\(useColumnSubset), canUseGPU=\(canUseGPU), shouldUseGPU=\(shouldUseGPU)")
 
