@@ -420,7 +420,7 @@ public final class ZoltraakBlockProver {
         var friMs: Double
 
         if let gpu = gpuProver, gpu.gpuAvailable {
-            let gpuResult = try gpu.prove(
+            let gpuResult = try await gpu.prove(
                 air: air,
                 traceLDEs: traceLDEs,
                 precomputedCommitments: commitments,
@@ -809,7 +809,7 @@ public final class ZoltraakBlockProver {
             print("[BlockProver] Using GPU Circle STARK prover")
             fflush(stdout)
             do {
-                let gpuResult = try gpuProver!.prove(
+                let gpuResult = try await gpuProver!.prove(
                     air: air,
                     traceLDEs: traceLDEs,
                     precomputedCommitments: commitments,

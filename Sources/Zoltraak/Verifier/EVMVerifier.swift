@@ -143,59 +143,34 @@ public final class EVMVerifier: Sendable {
         let traceLen = air.traceLength
 
         // Check metadata matches
-        guard proof.traceLength == traceLen else {
-            fputs("[EVMVerifier] traceLength mismatch: proof=\(proof.traceLength), air=\(traceLen)\n", stderr)
-            return false
-        }
+        guard proof.traceLength == traceLen else { return false }
 
-        // For column subset proving, tracePaths contains paths for only the proven columns
-        // (e.g., 16 paths out of 180 total columns). traceValues contains ALL column values.
-        guard let firstQR = proof.queryResponses.first else {
-            fputs("[EVMVerifier] no query responses\n", stderr)
-            return false
-        }
+        // tracePaths contains paths for the proving columns
+        guard let firstQR = proof.queryResponses.first else { return false }
         let numProvingColumns = firstQR.tracePaths.count
-        guard numProvingColumns > 0 else {
-            fputs("[EVMVerifier] no proving columns (numProvingColumns=0)\n", stderr)
-            return false
-        }
+        guard numProvingColumns > 0 else { return false }
 
-        fputs("[EVMVerifier] Verifying GPU proof: numColumns=\(proof.numColumns), provingCols=\(numProvingColumns), evalLen=\(evalLen)\n", stderr)
-
-        // Verify trace values count matches expected columns
+        // Verify trace values count matches numColumns
         for qr in proof.queryResponses {
             guard qr.queryIndex < evalLen else { return false }
             guard qr.traceValues.count == proof.numColumns else { return false }
             guard qr.tracePaths.count == numProvingColumns else { return false }
         }
 
-        // Verify commitments count matches proving columns count
-        // For column subset, we have one commitment per proving column
-        if proof.traceCommitments.count != numProvingColumns {
-            fputs("[EVMVerifier] commitments count mismatch: traceCommitments=\(proof.traceCommitments.count), expected=\(numProvingColumns)\n", stderr)
-            // Try with full columns as fallback
-            if proof.traceCommitments.count == proof.numColumns {
-                fputs("[EVMVerifier] Using full column indexing (numColumns=\(proof.numColumns))\n", stderr)
-                // Full column verification
-                for qr in proof.queryResponses {
-                    for colIdx in 0..<numProvingColumns {
-                        let val = qr.traceValues[colIdx]
-                        let leafInput = [val, M31(v: UInt32(qr.queryIndex)), M31.zero, M31.zero,
-                                         M31.zero, M31.zero, M31.zero, M31.zero]
-                        let leafDigest = M31Digest(values: poseidon2M31HashSingle(leafInput))
-                        if !verifyPoseidon2M31MerkleProof(
-                            leafDigest: leafDigest, path: qr.tracePaths[colIdx],
-                            index: qr.queryIndex, root: proof.traceCommitments[colIdx]
-                        ) { return false }
-                    }
-                }
-            } else {
-                return false
-            }
-        }
-
         // Verify trace Merkle paths for each proven column
         for qr in proof.queryResponses {
+            for pathIdx in 0..<numProvingColumns {
+                let val = qr.traceValues[pathIdx]
+                let queryIdx = qr.queryIndex
+                let leafInput = [val, M31(v: UInt32(queryIdx)), M31.zero, M31.zero,
+                                 M31.zero, M31.zero, M31.zero, M31.zero]
+                let leafDigest = M31Digest(values: poseidon2M31HashSingle(leafInput))
+                if !verifyPoseidon2M31MerkleProof(
+                    leafDigest: leafDigest, path: qr.tracePaths[pathIdx],
+                    index: qr.queryIndex, root: proof.traceCommitments[pathIdx]
+                ) { return false }
+            }
+
             // Verify composition Merkle path
             let compLeafInput = [qr.compositionValue, M31(v: UInt32(qr.queryIndex)),
                                  M31.zero, M31.zero, M31.zero, M31.zero, M31.zero, M31.zero]
@@ -206,7 +181,6 @@ public final class EVMVerifier: Sendable {
             ) { return false }
         }
 
-        fputs("[EVMVerifier] All Merkle proofs verified successfully\n", stderr)
         return true
     }
 

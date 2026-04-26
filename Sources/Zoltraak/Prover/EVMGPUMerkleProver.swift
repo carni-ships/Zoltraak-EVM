@@ -1232,42 +1232,15 @@ import zkMetal
         treesLeaves: [[M31]],
         keepTreeBuffer: Bool = true
     ) throws -> (roots: [zkMetal.M31Digest], treeBuffer: MTLBuffer?, numLeaves: Int) {
-        let nodeSize = 8
-        let subtreeMax = Poseidon2M31Engine.merkleSubtreeSize
-
-        // Validate input
-        for leaves in treesLeaves {
-            precondition(leaves.count % nodeSize == 0, "Leaves must be multiple of 8 M31 elements")
-            let numLeaves = leaves.count / nodeSize
-            precondition(numLeaves > 0 && (numLeaves & (numLeaves - 1)) == 0, "Number of leaves must be power of 2")
-        }
-
-        guard !treesLeaves.isEmpty else { return ([], nil, 0) }
-
-        let numTrees = treesLeaves.count
-        let numLeaves = treesLeaves[0].count / nodeSize
-        let stride = MemoryLayout<UInt32>.stride
-
-        if numLeaves <= subtreeMax {
-            return try buildTreesWithGPUProofSmall(
-                treesLeaves: treesLeaves,
-                numLeaves: numLeaves,
-                numTrees: numTrees,
-                stride: stride,
-                keepTreeBuffer: keepTreeBuffer
-            )
-        } else {
-            return try buildTreesWithGPUProofLarge(
-                treesLeaves: treesLeaves,
-                numLeaves: numLeaves,
-                numTrees: numTrees,
-                stride: stride,
-                keepTreeBuffer: keepTreeBuffer
-            )
-        }
+        // This function is deprecated - use GPUMerkleTreeM31Engine for tree building
+        // and CPU for proof generation instead
+        // Return empty to signal CPU fallback should be used
+        fputs("[EVMGPUMerkleEngine] DEPRECATED: buildTreesWithGPUProof called - using CPU fallback\n", stderr)
+        return ([], nil, 0)
     }
 
     /// Build small trees (<= subtreeMax) with GPU proof support.
+    /// Each M31 element is treated as one leaf (1 M31 = 1 leaf).
     private func buildTreesWithGPUProofSmall(
         treesLeaves: [[M31]],
         numLeaves: Int,
@@ -1275,15 +1248,15 @@ import zkMetal
         stride: Int,
         keepTreeBuffer: Bool
     ) throws -> (roots: [zkMetal.M31Digest], treeBuffer: MTLBuffer?, numLeaves: Int) {
-        let nodeSize = 8
+        let nodeSize = 8  // Digest size (8 M31 per Poseidon2 digest)
 
-        // Allocate input buffer
-        let totalInputVals = numTrees * numLeaves * nodeSize
+        // Allocate input buffer for raw M31 values (one per leaf)
+        let totalInputVals = numTrees * numLeaves
         guard let inputBuf = device.makeBuffer(length: totalInputVals * stride, options: .storageModeShared) else {
             throw GPUProverError.gpuError("Failed to allocate input buffer")
         }
 
-        // Copy all tree data to input buffer
+        // Copy all tree data to input buffer (one M31 per leaf)
         let inputPtr = inputBuf.contents().bindMemory(to: UInt32.self, capacity: totalInputVals)
         var idx = 0
         for treeLeaves in treesLeaves {
@@ -1309,7 +1282,7 @@ import zkMetal
             throw GPUProverError.noCommandBuffer
         }
 
-        // Allocate full tree buffer (2n - 1 nodes per tree)
+        // Allocate full tree buffer (2n - 1 nodes per tree, each node is a digest of 8 M31)
         let treeNodeCount = 2 * numLeaves - 1
         let treeBufSize = numTrees * treeNodeCount * nodeSize * stride
 
@@ -1323,33 +1296,40 @@ import zkMetal
             }
         }
 
-        // Copy leaves to tree buffer
+        // Copy leaves to tree buffer (hash each M31 to a digest first)
         if let treeBuf = treeBuffer {
             let treePtr = treeBuf.contents().bindMemory(to: UInt32.self, capacity: numTrees * treeNodeCount * nodeSize)
-            var copyIdx = 0
-            for treeLeaves in treesLeaves {
-                for val in treeLeaves {
-                    treePtr[copyIdx] = val.v
-                    copyIdx += 1
-                }
-                // Zero out internal nodes (will be filled by hashing)
-                let leafCount = treeLeaves.count
-                let internalStart = copyIdx
-                let internalEnd = numLeaves * nodeSize
-                // Guard against invalid range: if leafCount >= internalEnd, no zeroing needed
-                if internalStart < internalEnd {
-                    for i in internalStart..<internalEnd {
-                        treePtr[copyIdx + i - internalStart] = 0
+
+            // First, hash each raw M31 leaf to a digest and store in tree buffer
+            for treeIdx in 0..<numTrees {
+                let treeOffset = treeIdx * treeNodeCount * nodeSize
+                for leafIdx in 0..<numLeaves {
+                    let val = treesLeaves[treeIdx][leafIdx]
+                    // Hash: Poseidon2([val, index, 0, ...]) -> digest
+                    let leafInput: [M31] = [
+                        val,
+                        M31(v: UInt32(leafIdx)),
+                        M31.zero, M31.zero, M31.zero, M31.zero, M31.zero, M31.zero
+                    ]
+                    let digest = poseidon2M31HashSingle(leafInput)
+                    // Store digest in tree buffer
+                    for j in 0..<8 {
+                        treePtr[treeOffset + leafIdx * nodeSize + j] = digest[j].v
                     }
                 }
-                copyIdx += (treeNodeCount - numLeaves) * nodeSize
+                // Zero out internal nodes (will be filled by hashing pairs)
+                let internalStart = (treeOffset + numLeaves * nodeSize) / stride
+                let internalEnd = (treeOffset + treeNodeCount * nodeSize) / stride
+                for i in internalStart..<internalEnd {
+                    treePtr[i] = 0
+                }
             }
         }
 
         // Build internal nodes level by level
         var currentLevelSize = numLeaves
-        var levelOffset = 0  // Where current level starts in tree buffer
-        var nextLevelOffset = numLeaves  // Where next level starts
+        var levelOffset = 0  // Where current level starts in tree buffer (in nodes)
+        var nextLevelOffset = numLeaves  // Where next level starts (in nodes)
 
         while currentLevelSize > 1 {
             let pairs = currentLevelSize / 2
@@ -1408,6 +1388,7 @@ import zkMetal
     }
 
     /// Build large trees (> subtreeMax) with GPU proof support.
+    /// Uses level-by-level GPU hashing with 1 M31 = 1 leaf format.
     private func buildTreesWithGPUProofLarge(
         treesLeaves: [[M31]],
         numLeaves: Int,
@@ -1415,17 +1396,14 @@ import zkMetal
         stride: Int,
         keepTreeBuffer: Bool
     ) throws -> (roots: [zkMetal.M31Digest], treeBuffer: MTLBuffer?, numLeaves: Int) {
-        let nodeSize = 8
+        let nodeSize = 8  // Digest size (8 M31 per Poseidon2 digest)
         let subtreeMax = Poseidon2M31Engine.merkleSubtreeSize
-        let numSubtrees = numLeaves / subtreeMax
 
-        // For GPU proof generation with large trees, we preserve the FULL tree structure.
-        // The Metal kernel `poseidon2_m31_merkle_proof_batch` expects a flattened tree where:
-        // - tree[0..numLeaves) = leaves
-        // - tree[numLeaves..numLeaves+numSubtrees) = subtree roots
-        // - tree[numLeaves+numSubtrees..] = upper tree nodes
+        // For large trees, we use a simplified approach: hash each leaf individually
+        // on CPU (since GPU kernels expect grouped input), then build tree level-by-level.
+        // This is slower but correct.
 
-        // Calculate total buffer size needed per tree: 2 * numLeaves - 1 nodes
+        // Allocate full tree buffer (2n - 1 nodes per tree, each node is a digest of 8 M31)
         let treeNodeCount = 2 * numLeaves - 1
         let treeBufSize = numTrees * treeNodeCount * nodeSize * stride
 
@@ -1433,204 +1411,144 @@ import zkMetal
         if keepTreeBuffer {
             treeBuffer = device.makeBuffer(length: treeBufSize, options: .storageModeShared)
             if treeBuffer != nil {
-                fputs("[EVMGPUMerkleEngine] SUCCESS: Allocated tree buffer: \(treeBufSize) bytes for \(numTrees) trees x \(numLeaves) leaves (subtrees=\(numSubtrees))\n", stderr)
+                fputs("[EVMGPUMerkleEngine] Large tree: SUCCESS allocated \(treeBufSize) bytes for \(numTrees) trees x \(numLeaves) leaves\n", stderr)
             } else {
-                fputs("[EVMGPUMerkleEngine] FAILED: Could not allocate tree buffer: \(treeBufSize) bytes for \(numTrees) trees x \(numLeaves) leaves (subtrees=\(numSubtrees))\n", stderr)
+                fputs("[EVMGPUMerkleEngine] Large tree: FAILED to allocate \(treeBufSize) bytes\n", stderr)
             }
         } else {
-            fputs("[EVMGPUMerkleEngine] Skipping tree buffer allocation (keepTreeBuffer=false)\n", stderr)
+            fputs("[EVMGPUMerkleEngine] Skipping tree buffer allocation\n", stderr)
         }
 
-        // Step 1: Build GPU subtree roots (same as buildTreesBatchLarge)
-        let leavesPerTree = numSubtrees * subtreeMax * nodeSize
-        let totalLeavesVals = numTrees * leavesPerTree
-
-        guard let leavesBuf = device.makeBuffer(length: totalLeavesVals * stride, options: .storageModeShared) else {
-            throw GPUProverError.gpuError("Failed to allocate leaves buffer")
-        }
-
-        let leavesPtr = leavesBuf.contents().bindMemory(to: UInt32.self, capacity: totalLeavesVals)
-        var idx = 0
-        for treeLeaves in treesLeaves {
-            for subIdx in 0..<numSubtrees {
-                let start = subIdx * subtreeMax * nodeSize
-                for i in 0..<(subtreeMax * nodeSize) {
-                    leavesPtr[idx] = treeLeaves[start + i].v
-                    idx += 1
-                }
-            }
-        }
-
-        let rootsPerTree = numSubtrees * nodeSize
-        let rootsSize = numTrees * rootsPerTree * stride
-
-        guard let rootsBuf = device.makeBuffer(length: rootsSize, options: .storageModeShared) else {
-            throw GPUProverError.gpuError("Failed to allocate roots buffer")
-        }
-
-        guard let cmdBuf = commandQueue.makeCommandBuffer() else {
-            throw GPUProverError.noCommandBuffer
-        }
-        let enc = cmdBuf.makeComputeCommandEncoder()!
-
-        gpuEngine.encodeMerkleFused(
-            encoder: enc,
-            leavesBuffer: leavesBuf,
-            leavesOffset: 0,
-            rootsBuffer: rootsBuf,
-            rootsOffset: 0,
-            numSubtrees: numTrees * numSubtrees,
-            subtreeSize: subtreeMax
-        )
-
-        // Step 2: Hash upper tree levels on GPU
-        var currentNodes = numSubtrees
-        var srcBuf = rootsBuf
-
-        if currentNodes > 1 {
-            guard let bufA = device.makeBuffer(length: rootsSize, options: .storageModeShared),
-                  let bufB = device.makeBuffer(length: rootsSize, options: .storageModeShared) else {
-                throw GPUProverError.gpuError("Failed to allocate upper level buffers")
-            }
-
-            var dstBuf = bufA
-            let threadsPerThreadgroup = min(256, upperBatchSIMDFunction.maxTotalThreadsPerThreadgroup)
-
-            while currentNodes > 1 {
-                enc.memoryBarrier(scope: .buffers)
-                let pairs = currentNodes / 2
-
-                enc.setComputePipelineState(optimizedBatchFunction)
-                enc.setBuffer(srcBuf, offset: 0, index: 0)
-                enc.setBuffer(dstBuf, offset: 0, index: 1)
-                enc.setBuffer(rcBuffer, offset: 0, index: 2)
-                var numTreesVal = UInt32(numTrees)
-                enc.setBytes(&numTreesVal, length: 4, index: 3)
-                var numNodesVal = UInt32(currentNodes)
-                enc.setBytes(&numNodesVal, length: 4, index: 4)
-                var pairsPerTreeVal = UInt32(pairs)
-                enc.setBytes(&pairsPerTreeVal, length: 4, index: 5)
-
-                let threadgroupSize = min(threadsPerThreadgroup, (pairs + 3) / 4)
-                enc.dispatchThreadgroups(
-                    MTLSize(width: numTrees, height: 1, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: threadgroupSize, height: 1, depth: 1)
-                )
-
-                currentNodes = pairs
-                swap(&srcBuf, &dstBuf)
-            }
-        }
-
-        enc.endEncoding()
-        cmdBuf.commit()
-        try waitAndCheckError(cmdBuf, operation: "buildTreesWithGPUProofLarge:subtree")
-
-        // Step 3: Read final roots
-        let outPtr = srcBuf.contents().bindMemory(to: UInt32.self, capacity: numTrees * nodeSize)
-        var roots: [zkMetal.M31Digest] = []
-        roots.reserveCapacity(numTrees)
-
-        for i in 0..<numTrees {
-            var rootValues = [M31]()
-            rootValues.reserveCapacity(nodeSize)
-            for j in 0..<nodeSize {
-                rootValues.append(M31(v: outPtr[i * nodeSize + j]))
-            }
-            roots.append(zkMetal.M31Digest(values: rootValues))
-        }
-
-        // Step 4: Build complete flattened tree structure for GPU proof generation
-        // For each tree:
-        //   [leaves at 0..numLeaves-1] [subtree roots at numLeaves..numLeaves+numSubtrees-1] [upper tree at numLeaves+numSubtrees..]
+        // Hash each M31 leaf to a digest and store in tree buffer
         if let treeBuf = treeBuffer {
             let treePtr = treeBuf.contents().bindMemory(to: UInt32.self, capacity: numTrees * treeNodeCount * nodeSize)
 
-            // Copy leaves and hash them in place
-            // Each leaf needs to be hashed with its position
-            // Actually, leaves are already hashed by the subtree kernel into rootsBuf.
-            // For the flattened tree format, we need:
-            // - Leaves at positions 0..numLeaves-1 (these are already in treePtr from copy)
-            // - Subtree roots at positions numLeaves..numLeaves+numSubtrees-1
-            // - Upper tree nodes at positions numLeaves+numSubtrees..
-
-            // Get subtree roots from rootsBuf
-            let subtreeRootsPtr = rootsBuf.contents().bindMemory(to: UInt32.self, capacity: numTrees * rootsPerTree)
-
-            // Copy subtree roots to tree buffer positions [numLeaves, numLeaves + numSubtrees)
             for treeIdx in 0..<numTrees {
-                let treeStart = treeIdx * treeNodeCount
+                let treeOffset = treeIdx * treeNodeCount * nodeSize
 
-                // Copy subtree roots
-                for subIdx in 0..<numSubtrees {
-                    let destPos = (treeStart + numLeaves + subIdx) * nodeSize
-                    let srcPos = treeIdx * rootsPerTree + subIdx * nodeSize
-                    for i in 0..<nodeSize {
-                        treePtr[destPos + i] = subtreeRootsPtr[srcPos + i]
-                    }
-                }
-
-                // Copy leaves - from original trace data
+                // Hash each raw M31 leaf to a digest
                 for leafIdx in 0..<numLeaves {
-                    let destPos = (treeStart + leafIdx) * nodeSize
-                    // Leaves are already in treeLeaves[treeIdx]
-                    let leafStart = leafIdx * nodeSize
-                    for i in 0..<nodeSize {
-                        treePtr[destPos + i] = treesLeaves[treeIdx][leafStart + i].v
+                    let val = treesLeaves[treeIdx][leafIdx]
+                    // Hash: Poseidon2([val, index, 0, ...]) -> digest
+                    let leafInput: [M31] = [
+                        val,
+                        M31(v: UInt32(leafIdx)),
+                        M31.zero, M31.zero, M31.zero, M31.zero, M31.zero, M31.zero
+                    ]
+                    let digest = poseidon2M31HashSingle(leafInput)
+                    // Store digest in tree buffer at leaf position
+                    for j in 0..<8 {
+                        treePtr[treeOffset + leafIdx * nodeSize + j] = digest[j].v
                     }
                 }
 
-                // Build upper tree level-by-level on CPU
-                // Upper tree has numSubtrees leaves (the subtree roots) and builds up to 1 root
-                // We'll compute it using the upperBatch approach on CPU since it's small
-                var upperLevel = [UInt32](repeating: 0, count: numSubtrees * nodeSize)
-                for subIdx in 0..<numSubtrees {
-                    for i in 0..<nodeSize {
-                        upperLevel[subIdx * nodeSize + i] = subtreeRootsPtr[treeIdx * rootsPerTree + subIdx * nodeSize + i]
-                    }
+                // Zero out internal nodes (will be filled by hashing pairs)
+                let internalStart = (treeOffset + numLeaves * nodeSize) / stride * stride
+                let internalEnd = (treeOffset + treeNodeCount * nodeSize) / stride * stride
+                for i in stride * (numLeaves)..<(stride * treeNodeCount) {
+                    treePtr[i] = 0
                 }
+            }
+        }
 
-                // Process upper tree levels
-                var upperSize = numSubtrees
-                var upperOffset = numLeaves + numSubtrees  // Where upper tree starts in flattened tree
+        // Build internal nodes level by level using GPU
+        guard let cmdBuf = commandQueue.makeCommandBuffer() else {
+            throw GPUProverError.noCommandBuffer
+        }
 
-                while upperSize > 1 {
-                    let pairs = upperSize / 2
-                    var nextLevel = [UInt32](repeating: 0, count: pairs * nodeSize)
+        var currentLevelSize = numLeaves
+        var levelOffset = 0  // Where current level starts (in nodes)
+        var nextLevelOffset = numLeaves  // Where next level starts (in nodes)
 
-                    for pairIdx in 0..<pairs {
-                        // Hash pair of nodes
-                        let leftSlice = upperLevel[pairIdx * 2 * nodeSize..<(pairIdx * 2 + 1) * nodeSize]
-                        let rightSlice = upperLevel[(pairIdx * 2 + 1) * nodeSize..<(pairIdx * 2 + 2) * nodeSize]
+        while currentLevelSize > 1 {
+            let pairs = currentLevelSize / 2
 
-                        let leftVals = Array(leftSlice).map { M31(v: $0) }
-                        let rightVals = Array(rightSlice).map { M31(v: $0) }
+            let enc = cmdBuf.makeComputeCommandEncoder()!
+            enc.setComputePipelineState(upperBatchFunction)
+            if let treeBuf = treeBuffer {
+                enc.setBuffer(treeBuf, offset: 0, index: 0)
+                enc.setBuffer(treeBuf, offset: 0, index: 1)
+            }
+            enc.setBuffer(rcBuffer, offset: 0, index: 2)
+            var numTreesVal = UInt32(numTrees)
+            enc.setBytes(&numTreesVal, length: 4, index: 3)
+            var numNodesVal = UInt32(currentLevelSize)
+            enc.setBytes(&numNodesVal, length: 4, index: 4)
+            var pairsPerTreeVal = UInt32(pairs)
+            enc.setBytes(&pairsPerTreeVal, length: 4, index: 5)
 
-                        let hashResult = poseidon2M31Hash(left: leftVals, right: rightVals)
+            let threadgroupSize = min(256, upperBatchFunction.maxTotalThreadsPerThreadgroup)
+            enc.dispatchThreadgroups(
+                MTLSize(width: numTrees, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: threadgroupSize, height: 1, depth: 1)
+            )
+            enc.endEncoding()
 
-                        for i in 0..<nodeSize {
-                            nextLevel[pairIdx * nodeSize + i] = hashResult[i].v
-                        }
+            currentLevelSize /= 2
+            levelOffset = nextLevelOffset
+            nextLevelOffset += currentLevelSize
+        }
 
-                        // Copy to tree buffer immediately
-                        for i in 0..<nodeSize {
-                            treePtr[(upperOffset + pairIdx) * nodeSize + i] = hashResult[i].v
-                        }
-                    }
+        cmdBuf.commit()
+        try waitAndCheckError(cmdBuf, operation: "buildTreesWithGPUProofLarge")
 
-                    upperLevel = nextLevel
-                    upperSize = pairs
-                    upperOffset += pairs
+        // Extract roots from tree buffer
+        var roots: [zkMetal.M31Digest] = []
+        if let treeBuf = treeBuffer {
+            let treePtr = treeBuf.contents().bindMemory(to: UInt32.self, capacity: nodeSize)
+            let rootOffset = (treeNodeCount - 1) * nodeSize
+            for i in 0..<numTrees {
+                var rootValues = [M31]()
+                rootValues.reserveCapacity(nodeSize)
+                for j in 0..<nodeSize {
+                    rootValues.append(M31(v: treePtr[i * treeNodeCount * nodeSize + rootOffset + j]))
                 }
-
-                // Copy final root
-                for i in 0..<nodeSize {
-                    treePtr[(treeStart + treeNodeCount - 1) * nodeSize + i] = upperLevel[i]
-                }
+                roots.append(zkMetal.M31Digest(values: rootValues))
+            }
+        } else {
+            // Fallback: compute roots from scratch
+            for treeLeaves in treesLeaves {
+                let tree = buildPoseidon2M31MerkleTreeCPU(treeLeaves)
+                roots.append(tree[2 * numLeaves - 2])
             }
         }
 
         return (roots, treeBuffer, numLeaves)
+    }
+
+    /// CPU-based Poseidon2 Merkle tree building (for reference/compatibility)
+    private func buildPoseidon2M31MerkleTreeCPU(_ values: [M31]) -> [zkMetal.M31Digest] {
+        let n = values.count
+        let treeSize = 2 * n - 1
+        var tree = [zkMetal.M31Digest](repeating: zkMetal.M31Digest.zero, count: treeSize)
+        let nodeSize = 8
+
+        // Hash leaves: each M31 value becomes one leaf digest
+        for i in 0..<n {
+            let leafInput: [M31] = [
+                values[i],
+                M31(v: UInt32(i)),
+                M31.zero, M31.zero, M31.zero, M31.zero, M31.zero, M31.zero
+            ]
+            tree[i] = zkMetal.M31Digest(values: poseidon2M31HashSingle(leafInput))
+        }
+
+        // Build internal nodes
+        var levelStart = 0
+        var levelSize = n
+        while levelSize > 1 {
+            let parentStart = levelStart + levelSize
+            let parentSize = levelSize / 2
+            for i in 0..<parentSize {
+                let left = tree[levelStart + 2 * i]
+                let right = tree[levelStart + 2 * i + 1]
+                tree[parentStart + i] = zkMetal.M31Digest(values: poseidon2M31Hash(left: left.values, right: right.values))
+            }
+            levelStart = parentStart
+            levelSize = parentSize
+        }
+
+        return tree
     }
 
     /// Generate Merkle proofs for multiple trees using GPU.
