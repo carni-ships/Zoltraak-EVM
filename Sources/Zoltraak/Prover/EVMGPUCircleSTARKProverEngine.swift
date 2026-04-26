@@ -176,13 +176,15 @@ public final class EVMGPUCircleSTARKProverEngine {
         precomputedTreeBuffer: MTLBuffer? = nil,
         precomputedTreeNumLeaves: Int = 0
     ) async throws -> GPUCircleSTARKProverResult {
-        let proveT0 = CFAbsoluteTimeGetCurrent()
+        let proveStart = CFAbsoluteTimeGetCurrent()
         let (providedTraceLDEs, traceGenTime) = try prepareTraceLDEs(
             air: air,
             provided: traceLDEs
         )
+        let afterLDE = CFAbsoluteTimeGetCurrent()
 
         // Step 2: Commit trace columns (optionally precomputed, including trees)
+        let commitStart = CFAbsoluteTimeGetCurrent()
         let (traceCommitments, _, commitTime) = try commitTraceColumns(
             air: air,
             traceLDEs: providedTraceLDEs,
@@ -191,6 +193,8 @@ public final class EVMGPUCircleSTARKProverEngine {
             precomputedTreeBuffer: precomputedTreeBuffer,
             precomputedTreeNumLeaves: precomputedTreeNumLeaves
         )
+        let afterCommit = CFAbsoluteTimeGetCurrent()
+        print("[GPU Prover] commitTraceColumns: \(String(format: "%.1f", (afterCommit - commitStart) * 1000))ms")
 
         var transcript = CircleSTARKTranscript()
         transcript.absorbLabel("evm-gpu-circle-stark-v1")
@@ -198,11 +202,14 @@ public final class EVMGPUCircleSTARKProverEngine {
         let alpha = transcript.squeezeM31()
 
         // Step 4: Constraint evaluation with column subset
+        let constraintStart = CFAbsoluteTimeGetCurrent()
         let compositionEvals = try evaluateConstraintsWithSubset(
             air: air,
             traceLDEs: providedTraceLDEs,
             alpha: alpha
         )
+        let afterConstraint = CFAbsoluteTimeGetCurrent()
+        print("[GPU Prover] evaluateConstraintsWithSubset: \(String(format: "%.1f", (afterConstraint - constraintStart) * 1000))ms")
 
         // Step 5: Commit composition polynomial
         let blockLogTrace = (air as? BlockAIR)?.logBlockTraceLength ?? air.logTraceLength
@@ -226,6 +233,7 @@ public final class EVMGPUCircleSTARKProverEngine {
             numQueries: config.numQueries,
             transcript: &transcript
         )
+        let afterFRI = CFAbsoluteTimeGetCurrent()
 
         // Step 7: Query phase
         let queryResponses = try await generateQueryResponses(
@@ -235,6 +243,7 @@ public final class EVMGPUCircleSTARKProverEngine {
             compositionEvals: compositionEvals,
             air: air
         )
+        let afterQuery = CFAbsoluteTimeGetCurrent()
 
         // Build proof
         let proof = GPUCircleSTARKProverProof(
@@ -249,13 +258,24 @@ public final class EVMGPUCircleSTARKProverEngine {
             logBlowup: config.logBlowup
         )
 
-        let totalTime = CFAbsoluteTimeGetCurrent() - proveT0
+        let totalTime = CFAbsoluteTimeGetCurrent() - proveStart
 
         // Use actual tracked constraint time for accurate reporting
         let constraintTimeSeconds = lastConstraintTimeMs / 1000.0
 
         // Cleanup: Clear trace tree buffer to free GPU memory
         traceTreeBuffers = []
+
+        // Debug timing breakdown
+        // proveStart -> afterLDE = LDE time
+        // afterLDE -> afterConstraint = commit + constraint
+        // afterConstraint -> afterFRI = FRI time (but we don't have afterConstraint)
+        // Let's just print the deltas we have
+        let ldeMs = (afterLDE - proveStart) * 1000
+        let friMs = (afterFRI - afterLDE) * 1000
+        let queryMs = (afterQuery - afterFRI) * 1000
+        let buildMs = (proveStart + totalTime - afterQuery) * 1000
+        print("[GPU Prover] Phase timings: LDE: \(String(format: "%.1f", ldeMs))ms, FRI: \(String(format: "%.1f", friMs))ms, query: \(String(format: "%.1f", queryMs))ms, build: \(String(format: "%.1f", buildMs))ms, total: \(String(format: "%.1f", totalTime * 1000))ms")
 
         return GPUCircleSTARKProverResult(
             proof: proof,
@@ -439,15 +459,17 @@ public final class EVMGPUCircleSTARKProverEngine {
 
         // Use GPU constraint engine when available - but only for reasonable sizes
         // GPU engine may hang for very large traces due to memory pressure
+        // For column subset mode (16 cols), CPU parallel is faster than GPU
         if let gpuConstraint = gpuConstraintEngine {
             let evalLen = traceLDEs.first?.count ?? 0
-
-            // Use canHandle() check instead of hardcoded 65K limit
-            // This allows GPU for traces that fit in 100MB budget
             let numCols = min(columnIndices.count, 32)  // Only FRI-proving columns
             let canUseGPU = gpuConstraint.canHandle(traceLength: evalLen, numColumns: numCols)
+            let useColumnSubset = columnIndices.count < 180
+            // Use CPU for column subset mode - parallel processing is faster than GPU overhead
+            let shouldUseGPU = canUseGPU && !useColumnSubset
+            print("[GPU Prover] evaluateConstraints: evalLen=\(evalLen), numCols=\(numCols), subset=\(useColumnSubset), canUseGPU=\(canUseGPU), shouldUseGPU=\(shouldUseGPU)")
 
-            if evalLen >= config.gpuConstraintThreshold && canUseGPU {
+            if evalLen >= config.gpuConstraintThreshold && shouldUseGPU {
                 do {
                     let gpuResult = try gpuConstraint.evaluateConstraintsWithSubset(
                         traceLDEs: traceLDEs,
@@ -776,7 +798,11 @@ public final class EVMGPUCircleSTARKProverEngine {
         numQueries: Int,
         transcript: inout CircleSTARKTranscript
     ) throws -> GPUCircleFRIProof {
-        return try cpuCircleFRI(evals: evals, logN: logN, numQueries: numQueries, transcript: &transcript)
+        let friT0 = CFAbsoluteTimeGetCurrent()
+        let result = try cpuCircleFRI(evals: evals, logN: logN, numQueries: numQueries, transcript: &transcript)
+        let friMs = (CFAbsoluteTimeGetCurrent() - friT0) * 1000
+        print("[GPU Prover] circleFRI total: \(String(format: "%.1f", friMs))ms")
+        return result
     }
 
     // MARK: - Merkle Path from Trace (No Tree Rebuild)
