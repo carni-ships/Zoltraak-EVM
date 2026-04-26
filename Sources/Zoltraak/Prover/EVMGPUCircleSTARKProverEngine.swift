@@ -108,12 +108,9 @@ public final class EVMGPUCircleSTARKProverEngine {
     /// Flag indicating FRI engine has been initialized (success or failure)
     private var friEngineReady = false
 
-    /// GPU buffer containing flattened trace tree for GPU proof generation
-    private var traceTreeBuffer: MTLBuffer?
+    /// GPU buffers containing flattened trace trees for GPU proof generation (one per column)
+    private var traceTreeBuffers: [MTLBuffer] = []
     private var traceTreeNumLeaves: Int = 0
-
-    /// GPU Merkle engine for batch proof generation
-    private var gpuMerkleEngineForProofs: EVMGPUMerkleEngine?
 
     /// GPU availability
     public var gpuAvailable: Bool {
@@ -145,7 +142,6 @@ public final class EVMGPUCircleSTARKProverEngine {
                 logBlowup: config.logBlowup
             )
             self.cpuConstraintEngine = try? EVMGPUConstraintEngine(logTraceLength: 14)
-            self.gpuMerkleEngineForProofs = try EVMGPUMerkleEngine()
 
             // Initialize GPU FRI engine (Metal shaders are now fixed)
             do {
@@ -239,7 +235,6 @@ public final class EVMGPUCircleSTARKProverEngine {
         let queryResponses = try await generateQueryResponses(
             friProof: friProof,
             traceLDEs: providedTraceLDEs,
-            traceTrees: traceTrees,
             compTree: compTree,
             compositionEvals: compositionEvals,
             air: air
@@ -265,7 +260,7 @@ public final class EVMGPUCircleSTARKProverEngine {
         let constraintTimeSeconds = lastConstraintTimeMs / 1000.0
 
         // Cleanup: Clear trace tree buffer to free GPU memory
-        traceTreeBuffer = nil
+        traceTreeBuffers = []
 
         return GPUCircleSTARKProverResult(
             proof: proof,
@@ -323,28 +318,41 @@ public final class EVMGPUCircleSTARKProverEngine {
         let numProvingCols = provingColumnIndices.count
         let useColumnSubset = numProvingCols < air.numColumns
 
+        // Filter trace LDEs to proving columns for tree building
+        let provingTraceLDEs: [[M31]]
+        if useColumnSubset {
+            provingTraceLDEs = provingColumnIndices.compactMap { idx -> [M31]? in
+                guard idx < traceLDEs.count else { return nil }
+                return traceLDEs[idx]
+            }
+        } else {
+            provingTraceLDEs = traceLDEs
+        }
+
+        // Build GPU buffers for proof generation if GPU is available
+        // This enables O(Q) GPU proof generation instead of O(Q * C) CPU calls
+        if gpuMerkleEngine != nil && !provingTraceLDEs.isEmpty {
+            let evalLen = provingTraceLDEs[0].count
+            let roots = try buildGPUBuffersForProof(columns: provingTraceLDEs, count: evalLen)
+
+            let commitTime = CFAbsoluteTimeGetCurrent() - commitT0
+            return (roots, [], commitTime)
+        }
+
         // If precomputed trees are provided and not empty, use them directly
-        // Also ensure GPU buffer is set up for proof generation if needed
         if let precomputed = precomputed, let trees = precomputedTrees, !trees.isEmpty {
-            // Trees provided with actual data - use them
             let commitTime = CFAbsoluteTimeGetCurrent() - commitT0
             return (precomputed, trees, commitTime)
         }
 
-        // IMPORTANT: We don't need to build full trees here because:
-        // 1. generateQueryResponses uses poseidonMerklePathDirect which computes paths from trace values
-        // 2. Building trees is expensive (45s for 180 columns) and the trees would be unused
-        // Just return empty trees and the precomputed commitments
-        // Filter to proving columns if using column subset
-        let commitments = useColumnSubset
-            ? provingColumnIndices.compactMap { idx -> M31Digest? in
-                guard idx < (precomputed?.count ?? 0) else { return nil }
-                return precomputed?[idx]
-            }
-            : (precomputed ?? [])
+        // CPU fallback: build trees without GPU buffer preservation
+        let trees = try buildMerkleTreesGPUOrCPU(columns: provingTraceLDEs, count: provingTraceLDEs[0].count)
+        let commitments = trees.map { tree in
+            tree[2 * provingTraceLDEs[0].count - 2]
+        }
 
         let commitTime = CFAbsoluteTimeGetCurrent() - commitT0
-        return (commitments, [], commitTime)
+        return (commitments, trees, commitTime)
     }
 
     /// Build Merkle trees using GPU when available, CPU fallback otherwise
@@ -367,29 +375,35 @@ public final class EVMGPUCircleSTARKProverEngine {
         return trees
     }
 
-    /// Build Merkle trees using GPU with buffer preservation for GPU proof generation.
-    /// Note: This now uses GPUMerkleTreeM31Engine for correct tree building (1 M31 = 1 leaf).
-    /// The GPU buffer is NOT preserved since EVMGPUMerkleEngine uses wrong leaf grouping.
-    /// Proof generation will use CPU fallback.
-    private func buildMerkleTreesWithGPUProof(columns: [[M31]], count: Int) throws -> [[M31Digest]] {
+    /// Build GPU buffers for proof generation and return roots.
+    /// Uses GPUMerkleTreeM31Engine.buildTreeWithBuffer() which keeps GPU buffer for proof generation.
+    /// This enables O(1) GPU dispatch per query instead of O(Q * C) CPU calls.
+    ///
+    /// Returns roots for commitments, and stores GPU buffers internally for GPU proof generation.
+    private func buildGPUBuffersForProof(columns: [[M31]], count: Int) throws -> [M31Digest] {
         guard let gpuMerkle = gpuMerkleEngine else {
-            return try buildMerkleTreesGPUOrCPU(columns: columns, count: count)
+            // Fall back to CPU trees
+            return try buildMerkleTreesGPUOrCPU(columns: columns, count: count).map { tree in
+                tree[2 * count - 2]  // root is at index 2n-2
+            }
         }
 
-        // Build trees using GPU (correct format, but don't preserve buffer)
-        var trees = [[M31Digest]]()
-        trees.reserveCapacity(columns.count)
+        var roots = [M31Digest]()
+        roots.reserveCapacity(columns.count)
+        var gpuBuffers: [MTLBuffer] = []
+
         for col in columns {
-            let tree = try gpuMerkle.buildTree(values: col, count: count)
-            trees.append(tree)
+            // Build tree with GPU buffer preservation
+            let (root, treeBuf, _) = try gpuMerkle.buildTreeWithBuffer(values: col, count: count)
+            roots.append(root)
+            gpuBuffers.append(treeBuf)
         }
 
-        // Don't preserve GPU buffer since we can't use it for proofs
-        // (EVMGPUMerkleEngine has wrong leaf grouping)
-        self.traceTreeBuffer = nil
-        self.traceTreeNumLeaves = 0
+        // Preserve GPU buffers for GPU proof generation
+        self.traceTreeBuffers = gpuBuffers
+        self.traceTreeNumLeaves = count
 
-        return trees
+        return roots
     }
 
     /// Evaluate constraints with column subset optimization using GPU acceleration.
@@ -620,81 +634,107 @@ public final class EVMGPUCircleSTARKProverEngine {
     private func generateQueryResponses<A: CircleAIR>(
         friProof: GPUCircleFRIProof,
         traceLDEs: [[M31]],
-        traceTrees: [[M31Digest]],
         compTree: [M31Digest],
         compositionEvals: [M31],
         air: A
     ) async throws -> [GPUCircleSTARKQueryResponse] {
         let evalLen = traceLDEs[0].count
 
-        // For query responses, we need:
-        // 1. Trace values at query indices
-        // 2. Merkle paths for trace commitments (computed directly from trace LDEs)
-        // 3. Composition value at query index
-        // 4. Merkle path for composition
-
-        // Use traceTrees if available (GPU-computed), otherwise compute paths directly from trace
         // OPTIMIZATION: Only include paths for FRI-proving columns (not all 180)
-        // Get the proving column indices from the AIR
         let provingColumnIndices = getProvingColumnIndices(air: air)
         let numProvingCols = provingColumnIndices.count
         let useColumnSubsetQuery = numProvingCols < air.numColumns
-        // For column subset: traceValues should match commitment count
         let numTraceValues = useColumnSubsetQuery ? numProvingCols : air.numColumns
 
         var responses = [GPUCircleSTARKQueryResponse]()
 
-        // NOTE: GPU proof generation via EVMGPUMerkleEngine is disabled for query responses
-        // because it uses a different leaf grouping (8 M31 per leaf) than the CPU verifier
-        // expects (1 M31 per leaf). This causes verification failures.
-        // Using CPU fallback with poseidonMerklePathDirect which matches the verifier format.
+        // Check if GPU proof generation is available
+        // GPU proofs require GPUMerkleTreeM31Engine with buildTreeWithBuffer support
+        let useGPUProofs = gpuMerkleEngine != nil && !traceTreeBuffers.isEmpty
 
-        // CPU fallback - existing poseidonMerklePathDirect loop
-        for qi in friProof.queryIndices {
-            guard qi < evalLen else { continue }
+        if useGPUProofs {
+            // GPU path: Generate all proofs in O(Q) dispatches instead of O(Q * C)
+            // One dispatch per query, all columns processed together
+            for qi in friProof.queryIndices {
+                guard qi < evalLen else { continue }
 
-            // Get trace values at query - only for proving columns
-            var traceVals = [M31](repeating: .zero, count: numTraceValues)
-            for (newIdx, colIdx) in provingColumnIndices.enumerated() {
-                if newIdx < numTraceValues && colIdx < traceLDEs.count && qi < traceLDEs[colIdx].count {
-                    traceVals[newIdx] = traceLDEs[colIdx][qi]
-                }
-            }
-
-            // OPTIMIZATION: Only compute paths for proving columns (not all 180)
-            // With column subset optimization, only provingColumnCount columns go into FRI
-            var tracePaths = [[M31Digest]](repeating: [], count: numProvingCols)
-
-            // Parallelize path computation across columns using TaskGroup
-            try await withThrowingTaskGroup(of: (Int, [M31Digest]).self) { group in
-                for (pathIdx, colIdx) in provingColumnIndices.enumerated() {
-                    if colIdx < traceLDEs.count {
-                        group.addTask {
-                            let path = try self.poseidonMerklePathDirect(
-                                values: traceLDEs[colIdx],
-                                queryIndex: qi
-                            )
-                            return (pathIdx, path)
-                        }
+                // Get trace values at query - only for proving columns
+                var traceVals = [M31](repeating: .zero, count: numTraceValues)
+                for (newIdx, colIdx) in provingColumnIndices.enumerated() {
+                    if newIdx < numTraceValues && colIdx < traceLDEs.count && qi < traceLDEs[colIdx].count {
+                        traceVals[newIdx] = traceLDEs[colIdx][qi]
                     }
                 }
 
-                for try await (pathIdx, path) in group {
-                    tracePaths[pathIdx] = path
-                }
+                // Use GPU to generate proofs for all columns at once
+                let gpuProofs = try gpuMerkleEngine!.generateProofsGPU(
+                    treeBuffers: traceTreeBuffers,
+                    numTrees: numProvingCols,
+                    numLeaves: traceTreeNumLeaves,
+                    queryIndex: qi
+                )
+
+                // gpuProofs is [[M31Digest]] - one proof per column
+                // Each proof has numLevels sibling digests
+                let tracePaths = gpuProofs
+
+                // Get composition path from pre-built tree
+                let compPath = poseidon2M31MerkleProof(compTree, n: evalLen, index: qi)
+
+                responses.append(GPUCircleSTARKQueryResponse(
+                    traceValues: traceVals,
+                    tracePaths: tracePaths,
+                    compositionValue: compositionEvals[qi],
+                    compositionPath: compPath,
+                    quotientSplitValues: [],
+                    queryIndex: qi
+                ))
             }
+        } else {
+            // CPU fallback - poseidonMerklePathDirect with TaskGroup parallelization
+            for qi in friProof.queryIndices {
+                guard qi < evalLen else { continue }
 
-            // Get composition path from pre-built tree
-            let compPath = poseidon2M31MerkleProof(compTree, n: evalLen, index: qi)
+                // Get trace values at query - only for proving columns
+                var traceVals = [M31](repeating: .zero, count: numTraceValues)
+                for (newIdx, colIdx) in provingColumnIndices.enumerated() {
+                    if newIdx < numTraceValues && colIdx < traceLDEs.count && qi < traceLDEs[colIdx].count {
+                        traceVals[newIdx] = traceLDEs[colIdx][qi]
+                    }
+                }
 
-            responses.append(GPUCircleSTARKQueryResponse(
-                traceValues: traceVals,
-                tracePaths: tracePaths,
-                compositionValue: compositionEvals[qi],
-                compositionPath: compPath,
-                quotientSplitValues: [],
-                queryIndex: qi
-            ))
+                // Compute paths for proving columns using parallel TaskGroup
+                var tracePaths = [[M31Digest]](repeating: [], count: numProvingCols)
+                try await withThrowingTaskGroup(of: (Int, [M31Digest]).self) { group in
+                    for (pathIdx, colIdx) in provingColumnIndices.enumerated() {
+                        if colIdx < traceLDEs.count {
+                            group.addTask {
+                                let path = try self.poseidonMerklePathDirect(
+                                    values: traceLDEs[colIdx],
+                                    queryIndex: qi
+                                )
+                                return (pathIdx, path)
+                            }
+                        }
+                    }
+
+                    for try await (pathIdx, path) in group {
+                        tracePaths[pathIdx] = path
+                    }
+                }
+
+                // Get composition path from pre-built tree
+                let compPath = poseidon2M31MerkleProof(compTree, n: evalLen, index: qi)
+
+                responses.append(GPUCircleSTARKQueryResponse(
+                    traceValues: traceVals,
+                    tracePaths: tracePaths,
+                    compositionValue: compositionEvals[qi],
+                    compositionPath: compPath,
+                    quotientSplitValues: [],
+                    queryIndex: qi
+                ))
+            }
         }
 
         return responses
