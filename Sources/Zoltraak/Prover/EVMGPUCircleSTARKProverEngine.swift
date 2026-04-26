@@ -183,7 +183,7 @@ public final class EVMGPUCircleSTARKProverEngine {
         )
 
         // Step 2: Commit trace columns (optionally precomputed, including trees)
-        let (traceCommitments, traceTrees, commitTime) = try commitTraceColumns(
+        let (traceCommitments, _, commitTime) = try commitTraceColumns(
             air: air,
             traceLDEs: providedTraceLDEs,
             precomputed: precomputedCommitments,
@@ -213,8 +213,6 @@ public final class EVMGPUCircleSTARKProverEngine {
         )
 
         // Step 6: Circle FRI
-        let friStart = CFAbsoluteTimeGetCurrent()
-
         // Pad compositionEvals to power of 2 if needed (GPU FRI requires power of 2)
         var paddedEvals = compositionEvals
         if !isPowerOfTwo(compositionEvals.count) {
@@ -228,10 +226,8 @@ public final class EVMGPUCircleSTARKProverEngine {
             numQueries: config.numQueries,
             transcript: &transcript
         )
-        let friMs = (CFAbsoluteTimeGetCurrent() - friStart) * 1000
 
         // Step 7: Query phase
-        let queryStart = CFAbsoluteTimeGetCurrent()
         let queryResponses = try await generateQueryResponses(
             friProof: friProof,
             traceLDEs: providedTraceLDEs,
@@ -239,7 +235,6 @@ public final class EVMGPUCircleSTARKProverEngine {
             compositionEvals: compositionEvals,
             air: air
         )
-        let queryMs = (CFAbsoluteTimeGetCurrent() - queryStart) * 1000
 
         // Build proof
         let proof = GPUCircleSTARKProverProof(
@@ -271,8 +266,8 @@ public final class EVMGPUCircleSTARKProverEngine {
             ldeTimeSeconds: 0,
             commitTimeSeconds: commitTime,
             constraintTimeSeconds: constraintTimeSeconds,
-            friTimeSeconds: friMs / 1000.0,
-            queryTimeSeconds: queryMs / 1000.0
+            friTimeSeconds: totalTime,
+            queryTimeSeconds: totalTime
         )
     }
 
@@ -651,10 +646,33 @@ public final class EVMGPUCircleSTARKProverEngine {
         // Check if GPU proof generation is available
         // GPU proofs require GPUMerkleTreeM31Engine with buildTreeWithBuffer support
         let useGPUProofs = gpuMerkleEngine != nil && !traceTreeBuffers.isEmpty
+        print("[GPU Prover] Query: GPU proofs=\(useGPUProofs), buffers=\(traceTreeBuffers.count), numLeaves=\(traceTreeNumLeaves), cols=\(numProvingCols), queries=\(friProof.queryIndices.count)")
 
         if useGPUProofs {
             // GPU path: Generate all proofs in O(Q) dispatches instead of O(Q * C)
-            // One dispatch per query, all columns processed together
+            // Pre-concatenate tree buffers ONCE to avoid copying per query
+            let prepStart = CFAbsoluteTimeGetCurrent()
+            let nodeSize = 8
+            let treeNodeCount = 2 * traceTreeNumLeaves - 1
+            let totalTreeBytes = traceTreeBuffers.count * treeNodeCount * nodeSize * MemoryLayout<UInt32>.stride
+
+            guard let combinedTreeBuf = gpuMerkleEngine!.device.makeBuffer(length: totalTreeBytes, options: .storageModeShared) else {
+                throw MSMError.gpuError("Failed to allocate combined tree buffer")
+            }
+
+            // Fast copy using memcpy for each tree buffer
+            let destPtr = combinedTreeBuf.contents().bindMemory(to: UInt32.self, capacity: traceTreeBuffers.count * treeNodeCount * nodeSize)
+            let bytesPerTree = treeNodeCount * nodeSize * MemoryLayout<UInt32>.stride
+            var offset = 0
+            for treeBuf in traceTreeBuffers {
+                memcpy(destPtr.advanced(by: offset), treeBuf.contents(), bytesPerTree)
+                offset += treeNodeCount * nodeSize
+            }
+            let prepMs = (CFAbsoluteTimeGetCurrent() - prepStart) * 1000
+            print("[GPU Prover] Tree prep: \(String(format: "%.1f", prepMs))ms for \(traceTreeBuffers.count) buffers")
+
+            // Generate proofs for each query using pre-concatenated buffer
+            let queryStart = CFAbsoluteTimeGetCurrent()
             for qi in friProof.queryIndices {
                 guard qi < evalLen else { continue }
 
@@ -668,7 +686,7 @@ public final class EVMGPUCircleSTARKProverEngine {
 
                 // Use GPU to generate proofs for all columns at once
                 let gpuProofs = try gpuMerkleEngine!.generateProofsGPU(
-                    treeBuffers: traceTreeBuffers,
+                    treeBuffer: combinedTreeBuf,
                     numTrees: numProvingCols,
                     numLeaves: traceTreeNumLeaves,
                     queryIndex: qi
@@ -690,6 +708,8 @@ public final class EVMGPUCircleSTARKProverEngine {
                     queryIndex: qi
                 ))
             }
+            let gpuQueryMs = (CFAbsoluteTimeGetCurrent() - queryStart) * 1000
+            print("[GPU Prover] GPU query loop: \(String(format: "%.1f", gpuQueryMs))ms for \(friProof.queryIndices.count) queries")
         } else {
             // CPU fallback - poseidonMerklePathDirect with TaskGroup parallelization
             for qi in friProof.queryIndices {
