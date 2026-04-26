@@ -212,12 +212,15 @@ public final class EVMGPUCircleSTARKProverEngine {
         print("[GPU Prover] evaluateConstraintsWithSubset: \(String(format: "%.1f", (afterConstraint - constraintStart) * 1000))ms")
 
         // Step 5: Commit composition polynomial
+        let compStart = CFAbsoluteTimeGetCurrent()
         let blockLogTrace = (air as? BlockAIR)?.logBlockTraceLength ?? air.logTraceLength
         let (compositionCommitment, compTree) = try commitComposition(
             evals: compositionEvals,
             logN: blockLogTrace + config.logBlowup,
             transcript: &transcript
         )
+        let afterComp = CFAbsoluteTimeGetCurrent()
+        print("[GPU Prover] commitComposition: \(String(format: "%.1f", (afterComp - compStart) * 1000))ms")
 
         // Step 6: Circle FRI
         // Pad compositionEvals to power of 2 if needed (GPU FRI requires power of 2)
@@ -227,6 +230,7 @@ public final class EVMGPUCircleSTARKProverEngine {
             paddedEvals = compositionEvals + [M31](repeating: .zero, count: paddedSize - compositionEvals.count)
         }
 
+        let friStart = CFAbsoluteTimeGetCurrent()
         let friProof = try circleFRI(
             evals: paddedEvals,
             logN: blockLogTrace + config.logBlowup,
@@ -234,8 +238,10 @@ public final class EVMGPUCircleSTARKProverEngine {
             transcript: &transcript
         )
         let afterFRI = CFAbsoluteTimeGetCurrent()
+        print("[GPU Prover] circleFRI: \(String(format: "%.1f", (afterFRI - friStart) * 1000))ms")
 
         // Step 7: Query phase
+        let queryStart = CFAbsoluteTimeGetCurrent()
         let queryResponses = try await generateQueryResponses(
             friProof: friProof,
             traceLDEs: providedTraceLDEs,
@@ -244,6 +250,7 @@ public final class EVMGPUCircleSTARKProverEngine {
             air: air
         )
         let afterQuery = CFAbsoluteTimeGetCurrent()
+        print("[GPU Prover] generateQueryResponses: \(String(format: "%.1f", (afterQuery - queryStart) * 1000))ms")
 
         // Build proof
         let proof = GPUCircleSTARKProverProof(
@@ -344,11 +351,23 @@ public final class EVMGPUCircleSTARKProverEngine {
             provingTraceLDEs = traceLDEs
         }
 
+        // Use precomputed commitments when available - no need to rebuild GPU trees
+        // This saves ~800ms by skipping redundant GPU tree rebuilding
+        if let precomputed = precomputed, !precomputed.isEmpty {
+            let commitTime = CFAbsoluteTimeGetCurrent() - commitT0
+            print("[GPU Prover] commitTraceColumns: using \(precomputed.count) precomputed commitments (skip GPU tree rebuild)")
+            return (precomputed, [], commitTime)
+        }
+
         // Build GPU buffers for proof generation if GPU is available
         // This enables O(Q) GPU proof generation instead of O(Q * C) CPU calls
         if gpuMerkleEngine != nil && !provingTraceLDEs.isEmpty {
             let evalLen = provingTraceLDEs[0].count
+            print("[GPU Prover] commitTraceColumns: building \(provingTraceLDEs.count) GPU trees for \(evalLen) leaves...")
+            let buildStart = CFAbsoluteTimeGetCurrent()
             let roots = try buildGPUBuffersForProof(columns: provingTraceLDEs, count: evalLen)
+            let buildMs = (CFAbsoluteTimeGetCurrent() - buildStart) * 1000
+            print("[GPU Prover] buildGPUBuffersForProof: \(String(format: "%.1f", buildMs))ms")
 
             let commitTime = CFAbsoluteTimeGetCurrent() - commitT0
             return (roots, [], commitTime)
