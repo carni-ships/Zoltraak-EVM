@@ -443,15 +443,23 @@ public final class EVMGPUCircleSTARKProverEngine {
             }
         }
 
-        var roots = [M31Digest]()
-        roots.reserveCapacity(columns.count)
-        var gpuBuffers: [MTLBuffer] = []
+        // Use batch GPU tree building for all columns at once
+        let (roots, treeBuf, nodesPerTree) = try gpuMerkle.buildTreesBatch(columns: columns, count: count)
 
-        for col in columns {
-            // Build tree with GPU buffer preservation
-            let (root, treeBuf, _) = try gpuMerkle.buildTreeWithBuffer(values: col, count: count)
-            roots.append(root)
-            gpuBuffers.append(treeBuf)
+        // Split combined buffer into individual tree buffers for GPU proof generation
+        let nodeSize = 8
+        let treeNodeCount = 2 * count - 1
+        let numTrees = columns.count
+        var gpuBuffers: [MTLBuffer] = []
+        gpuBuffers.reserveCapacity(numTrees)
+
+        for i in 0..<numTrees {
+            let offset = i * treeNodeCount * nodeSize * MemoryLayout<UInt32>.stride
+            let length = treeNodeCount * nodeSize * MemoryLayout<UInt32>.stride
+            if let subBuf = gpuMerkle.device.makeBuffer(length: length, options: .storageModeShared) {
+                memcpy(subBuf.contents(), treeBuf.contents().advanced(by: offset), length)
+                gpuBuffers.append(subBuf)
+            }
         }
 
         // Preserve GPU buffers for GPU proof generation
