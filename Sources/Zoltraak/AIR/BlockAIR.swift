@@ -680,12 +680,16 @@ public struct BlockAIR: CircleAIR {
 
         if commitments.isEmpty {
             do {
-                let gpuEngine = try EVMGPUMerkleEngine()
+                let gpuEngine = try GPUMerkleTreeM31Engine()
                 let gpuStart = CFAbsoluteTimeGetCurrent()
 
-                // Use batch GPU engine to process filtered columns in ONE GPU dispatch
-                // This is MUCH faster than sequential per-column processing
-                let batchRoots = try gpuEngine.buildTreesBatch(treesLeaves: columnsToCommit)
+                // Use GPUMerkleTreeM31Engine which correctly hashes leaves before building tree
+                // This is CRITICAL: EVMGPUMerkleEngine.buildTreesBatch is broken - it passes
+                // raw M31 values to poseidon2_m31_merkle_fused which expects pre-hashed digests
+                let (batchRoots, _, _) = try gpuEngine.buildTreesBatch(
+                    columns: columnsToCommit,
+                    count: columnsToCommit[0].count
+                )
 
                 // Convert M31Digest to M31 for commitment format
                 for rootDigest in batchRoots {

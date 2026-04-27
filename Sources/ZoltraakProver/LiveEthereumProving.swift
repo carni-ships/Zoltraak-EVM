@@ -173,14 +173,18 @@ public func runLiveProvingMode(
 
             // Handle unified block proof vs transaction-level proofs
             if let blockProof = proof.aggregatedProof, !blockProof.isEmpty {
-                // Unified block proof - verify structurally
+                // Unified block proof - verify with full GPU prover verifier
                 do {
                     let gpuProof = try deserializeGPUProof(from: blockProof)
-                    // Basic structural verification (Merkle paths need prover transcript state)
-                    if gpuProof.traceCommitments.count > 0 && gpuProof.queryResponses.count > 0 {
+                    // Full verification: Merkle paths for trace and composition
+                    let isValid = verifier.verify(gpuProof)
+                    if isValid {
                         starkVerified = 1
                     } else {
                         starkFailed = 1
+                        if !quiet {
+                            print("    UNIFIED VERIFY FAILED: Merkle path verification failed")
+                        }
                     }
                 } catch {
                     starkFailed = 1

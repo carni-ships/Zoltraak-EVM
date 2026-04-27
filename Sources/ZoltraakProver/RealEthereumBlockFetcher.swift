@@ -769,6 +769,41 @@ public struct RealEthereumBlockFetcher {
 
             let batchProof = try batchProver.proveBatch(transactions: evmTransactions)
 
+            // Verify the proof
+            let verifyStart = CFAbsoluteTimeGetCurrent()
+            let verifier = EVMVerifier()
+            var starkVerified = 0
+            var starkFailed = 0
+            var verifyError: String?
+
+            if let blockProof = batchProof.aggregatedProof, !blockProof.isEmpty {
+                // Unified block proof - verify with full GPU prover verifier
+                do {
+                    let gpuProof = try deserializeGPUProof(from: blockProof)
+                    let isValid = verifier.verify(gpuProof)
+                    if isValid {
+                        starkVerified = 1
+                    } else {
+                        starkFailed = 1
+                        verifyError = "Merkle path verification failed"
+                    }
+                } catch {
+                    starkFailed = 1
+                    verifyError = "Deserialization failed: \(error)"
+                }
+            } else if !batchProof.transactionProofs.isEmpty {
+                // Transaction-level proofs - verify each one
+                for txProof in batchProof.transactionProofs {
+                    let result = verifier.verify(txProof)
+                    if case .valid = result {
+                        starkVerified += 1
+                    } else {
+                        starkFailed += 1
+                    }
+                }
+            }
+
+            let verifyTimeMs = (CFAbsoluteTimeGetCurrent() - verifyStart) * 1000
             let totalTimeMs = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
             let perTxTime = totalTimeMs / Double(maxTxs)
             let throughput = Double(maxTxs) / (totalTimeMs / 1000)
@@ -787,6 +822,8 @@ public struct RealEthereumBlockFetcher {
                Per transaction: \(String(format: "%.2f", perTxTime))ms
                Throughput: \(String(format: "%.1f", throughput)) TX/s
                Proof size: ~\(proofSize) bytes (estimated)
+               STARK Verification: \(starkVerified)/\(starkVerified + starkFailed) valid (\(String(format: "%.1f", verifyTimeMs))ms)
+            \(verifyError.map { "               Verification error: \($0)" } ?? "")
 
             ═══════════════════════════════════════════════════════════════════
             """)
