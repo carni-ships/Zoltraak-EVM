@@ -110,7 +110,7 @@ case "real-block-unified":
             useGPU: true,
             logTraceLength: 8,
             numQueries: 4,
-            logBlowup: 2,
+            logBlowup: 1,  // 2x blowup - fastest allowed by CircleSTARKConfig
             useUnifiedProof: true,
             provingColumnCount: 180,
             criticalColumnIndices: []
