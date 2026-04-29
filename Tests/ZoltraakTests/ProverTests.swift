@@ -145,27 +145,32 @@ struct ProverTests {
     }
 
     @Test
-    static func testEVMGPUMerkleEngineBatch() throws {
-        let engine = try EVMGPUMerkleEngine()
-
-        // Build multiple trees
+    static func testGPUMerkleTreeM31EngineBatchFixed() throws {
+        // Test that the batch tree building works for GPUMerkleTreeM31Engine
+        // Uses 4 trees with same leaf values to test structural correctness
         let numTrees = 4
         let leavesPerTree = 64
-        var treesLeaves: [[M31]] = []
 
+        // Generate 1 M31 per leaf (GPUMerkleTreeM31Engine format)
+        var treesLeaves: [[M31]] = []
         for t in 0..<numTrees {
             var leaves = [M31]()
             for i in 0..<leavesPerTree {
-                leaves.append(M31(v: UInt32(t * 1000 + i + 1)))
+                leaves.append(M31(v: UInt32(i + 1)))
             }
             treesLeaves.append(leaves)
         }
 
-        let roots = try engine.buildTreesBatch(treesLeaves: treesLeaves)
+        let gpuEngine = try GPUMerkleTreeM31Engine()
+        let cpuProver = ZoltraakCPUMerkleProver()
 
-        #expect(roots.count == numTrees)
-        for (i, root) in roots.enumerated() {
-            print("Tree \(i) root: \(root.values.map { String(format:"0x%08X", $0.v) }.joined(separator: ", "))")
+        // Test 4-tree batch
+        let (gpuRoots, _, _) = try gpuEngine.buildTreesBatch(columns: treesLeaves, count: leavesPerTree)
+
+        #expect(gpuRoots.count == numTrees)
+        for i in 0..<numTrees {
+            let cpuRoot = cpuProver.buildMerkleTree(values: treesLeaves[i], numLeaves: leavesPerTree)
+            #expect(gpuRoots[i].values[0].v == cpuRoot.values[0].v, "Tree \(i) 4-tree batch must match")
         }
     }
 

@@ -209,6 +209,15 @@ public final class ZoltraakCPUMerkleProver {
         let digests = hashLeavesWithPosition(values: leafValues, positions: positions)
 
         // Step 2: Build tree from digests
+        return buildMerkleTreeFromDigests(digests: digests, numLeaves: numLeaves)
+    }
+
+    /// Build Merkle tree from pre-computed digests (8 M31 elements per leaf).
+    /// Useful for testing GPU tree building against CPU.
+    public func buildMerkleTreeFromDigests(digests: [M31], numLeaves: Int) -> zkMetal.M31Digest {
+        precondition(digests.count >= numLeaves * 8, "digests must have numLeaves * 8 M31 elements")
+
+        // Build tree from pre-computed digests
         var nodes: [zkMetal.M31Digest] = []
         nodes.reserveCapacity(numLeaves)
         for i in 0..<numLeaves {

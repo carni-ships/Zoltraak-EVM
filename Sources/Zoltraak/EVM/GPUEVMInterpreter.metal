@@ -1779,19 +1779,49 @@ kernel void evm_main_loop(
                 break;
             }
 
+            // DIV (0x04) - Unsigned integer division
+            // Stack: [dividend, divisor] where divisor is on top
+            // DIV computes floor(dividend / divisor)
             case OP_DIV: {
                 if (state.stackPtr < 2) { state.running = 0; break; }
-                stackPop(&states[gid], stack, gid, maxStackDepth);
-                stackPop(&states[gid], stack, gid, maxStackDepth);
-                stackPush(&states[gid], stack, gid, maxStackDepth, M31Word{});
+                M31Word divisor = stackPop(&states[gid], stack, gid, maxStackDepth);  // Top = divisor
+                M31Word dividend = stackPop(&states[gid], stack, gid, maxStackDepth); // Next = dividend
+                M31Word result;
+                if (m31word_is_zero(divisor)) {
+                    for (uint i = 0; i < 8; i++) result.limb[i] = m31_zero();
+                } else {
+                    uint64_t divVal = 0, dendVal = 0;
+                    for (uint i = 0; i < 8; i++) {
+                        dendVal |= uint64_t(dividend.limb[i].v) << (i * 31);
+                        divVal |= uint64_t(divisor.limb[i].v) << (i * 31);
+                    }
+                    uint64_t res = dendVal / divVal;
+                    result = uint64_to_m31word(res);
+                }
+                stackPush(&states[gid], stack, gid, maxStackDepth, result);
                 break;
             }
 
+            // MOD (0x06) - Unsigned modulo
+            // Stack: [dividend, divisor] where divisor is on top
+            // MOD computes dividend % divisor
             case OP_MOD: {
                 if (state.stackPtr < 2) { state.running = 0; break; }
-                stackPop(&states[gid], stack, gid, maxStackDepth);
-                stackPop(&states[gid], stack, gid, maxStackDepth);
-                stackPush(&states[gid], stack, gid, maxStackDepth, M31Word{});
+                M31Word divisor = stackPop(&states[gid], stack, gid, maxStackDepth);  // Top = divisor
+                M31Word dividend = stackPop(&states[gid], stack, gid, maxStackDepth); // Next = dividend
+                M31Word result;
+                if (m31word_is_zero(divisor)) {
+                    for (uint i = 0; i < 8; i++) result.limb[i] = m31_zero();
+                } else {
+                    uint64_t divVal = 0, dendVal = 0;
+                    for (uint i = 0; i < 8; i++) {
+                        dendVal |= uint64_t(dividend.limb[i].v) << (i * 31);
+                        divVal |= uint64_t(divisor.limb[i].v) << (i * 31);
+                    }
+                    uint64_t res = dendVal % divVal;
+                    result = uint64_to_m31word(res);
+                }
+                stackPush(&states[gid], stack, gid, maxStackDepth, result);
                 break;
             }
 

@@ -151,7 +151,7 @@ struct EVMArithmeticOpcodeTests {
 
     @Test
     static func testDIV_Zero() throws {
-        // Division by zero should revert
+        // Per EVM spec: Division by zero returns 0 without revert
         let code: [UInt8] = [
             OpcodeBytes.PUSH1, 0x0A,
             OpcodeBytes.PUSH1, 0x00,
@@ -160,8 +160,9 @@ struct EVMArithmeticOpcodeTests {
         ]
         let engine = createTestEngine()
         let result = try engine.execute(code: code, gasLimit: 100_000)
-        // Division by zero should cause revert
-        #expect(result.trace.reverted)
+        // EVM spec: DIV by zero returns 0, does NOT revert
+        #expect(!result.trace.reverted)
+        #expect(result.success)
     }
 
     // MARK: - SDIV (0x05)

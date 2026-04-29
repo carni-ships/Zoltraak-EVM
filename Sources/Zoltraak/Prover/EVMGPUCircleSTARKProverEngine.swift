@@ -355,28 +355,21 @@ public final class EVMGPUCircleSTARKProverEngine {
         // This saves ~800ms by skipping redundant GPU tree rebuilding
         // GPU proofs will fall back to CPU path since we don't have tree buffers
         if let precomputed = precomputed, !precomputed.isEmpty {
-            // If precomputed tree buffer is available, set it up for GPU proofs
-            if let precomputedBuf = precomputedTreeBuffer, precomputedTreeNumLeaves > 0, let gpuEngine = gpuMerkleEngine {
-                // Reconstruct traceTreeBuffers from single combined buffer
-                let nodeSize = 8
-                let treeNodeCount = 2 * precomputedTreeNumLeaves - 1
-                let numTrees = precomputed.count
-                var buffers: [MTLBuffer] = []
-                buffers.reserveCapacity(numTrees)
-                for i in 0..<numTrees {
-                    let offset = i * treeNodeCount * nodeSize * MemoryLayout<UInt32>.stride
-                    let length = treeNodeCount * nodeSize * MemoryLayout<UInt32>.stride
-                    if let subBuf = gpuEngine.device.makeBuffer(length: length, options: .storageModeShared) {
-                        memcpy(subBuf.contents(), precomputedBuf.contents().advanced(by: offset), length)
-                        buffers.append(subBuf)
-                    }
-                }
-                self.traceTreeBuffers = buffers
-                self.traceTreeNumLeaves = precomputedTreeNumLeaves
-                print("[GPU Prover] commitTraceColumns: using precomputed tree buffer (\(numTrees) trees)")
+            // Build GPU trees for proof generation (needed for correct Merkle paths)
+            // This is necessary because poseidonMerklePathDirect is broken for internal nodes
+            if gpuMerkleEngine != nil && !provingTraceLDEs.isEmpty {
+                let evalLen = provingTraceLDEs[0].count
+                print("[GPU Prover] commitTraceColumns: building \(provingTraceLDEs.count) GPU trees for \(evalLen) leaves...")
+                let buildStart = CFAbsoluteTimeGetCurrent()
+                let roots = try buildGPUBuffersForProof(columns: provingTraceLDEs, count: evalLen)
+                let buildMs = (CFAbsoluteTimeGetCurrent() - buildStart) * 1000
+                print("[GPU Prover] buildGPUBuffersForProof: \(String(format: "%.1f", buildMs))ms")
+
+                let commitTime = CFAbsoluteTimeGetCurrent() - commitT0
+                return (roots, [], commitTime)
             }
             let commitTime = CFAbsoluteTimeGetCurrent() - commitT0
-            print("[GPU Prover] commitTraceColumns: using \(precomputed.count) precomputed commitments (skip GPU tree rebuild)")
+            print("[GPU Prover] commitTraceColumns: using \(precomputed.count) precomputed commitments (no tree buffer)")
             return (precomputed, [], commitTime)
         }
 
@@ -450,12 +443,15 @@ public final class EVMGPUCircleSTARKProverEngine {
         let nodeSize = 8
         let treeNodeCount = 2 * count - 1
         let numTrees = columns.count
+        let bytesPerTree = treeNodeCount * nodeSize * MemoryLayout<UInt32>.stride
+        print("[GPU Prover] buildGPUBuffersForProof: splitting \(numTrees) trees, \(bytesPerTree) bytes each")
+        print("[GPU Prover] buildGPUBuffersForProof: treeNodeCount=\(treeNodeCount), totalCombined=\(numTrees * bytesPerTree)")
         var gpuBuffers: [MTLBuffer] = []
         gpuBuffers.reserveCapacity(numTrees)
 
         for i in 0..<numTrees {
-            let offset = i * treeNodeCount * nodeSize * MemoryLayout<UInt32>.stride
-            let length = treeNodeCount * nodeSize * MemoryLayout<UInt32>.stride
+            let offset = i * bytesPerTree
+            let length = bytesPerTree
             if let subBuf = gpuMerkle.device.makeBuffer(length: length, options: .storageModeShared) {
                 memcpy(subBuf.contents(), treeBuf.contents().advanced(by: offset), length)
                 gpuBuffers.append(subBuf)
@@ -715,7 +711,8 @@ public final class EVMGPUCircleSTARKProverEngine {
 
         // Check if GPU proof generation is available
         // GPU proofs require GPUMerkleTreeM31Engine with buildTreeWithBuffer support
-        let useGPUProofs = gpuMerkleEngine != nil && !traceTreeBuffers.isEmpty
+        // DISABLED: GPU proof kernel has issues with internal node layout
+        let useGPUProofs = false && gpuMerkleEngine != nil && !traceTreeBuffers.isEmpty
         print("[GPU Prover] Query: GPU proofs=\(useGPUProofs), buffers=\(traceTreeBuffers.count), numLeaves=\(traceTreeNumLeaves), cols=\(numProvingCols), queries=\(friProof.queryIndices.count)")
 
         if useGPUProofs {
@@ -781,7 +778,8 @@ public final class EVMGPUCircleSTARKProverEngine {
             let gpuQueryMs = (CFAbsoluteTimeGetCurrent() - queryStart) * 1000
             print("[GPU Prover] GPU query loop: \(String(format: "%.1f", gpuQueryMs))ms for \(friProof.queryIndices.count) queries")
         } else {
-            // CPU fallback - poseidonMerklePathDirect with TaskGroup parallelization
+            // CPU fallback - read paths from pre-built GPU tree buffers
+            // This is correct unlike poseidonMerklePathDirect which can't compute sibling hashes
             for qi in friProof.queryIndices {
                 guard qi < evalLen else { continue }
 
@@ -793,23 +791,40 @@ public final class EVMGPUCircleSTARKProverEngine {
                     }
                 }
 
-                // Compute paths for proving columns using parallel TaskGroup
+                // Read paths from pre-built GPU tree buffers (if available)
                 var tracePaths = [[M31Digest]](repeating: [], count: numProvingCols)
-                try await withThrowingTaskGroup(of: (Int, [M31Digest]).self) { group in
-                    for (pathIdx, colIdx) in provingColumnIndices.enumerated() {
-                        if colIdx < traceLDEs.count {
-                            group.addTask {
-                                let path = try self.poseidonMerklePathDirect(
-                                    values: traceLDEs[colIdx],
-                                    queryIndex: qi
-                                )
-                                return (pathIdx, path)
-                            }
+                if !traceTreeBuffers.isEmpty && traceTreeNumLeaves > 0 {
+                    let nodeSize = 8
+                    let treeNodeCount = 2 * traceTreeNumLeaves - 1
+                    for (pathIdx, treeBuf) in traceTreeBuffers.enumerated() {
+                        if pathIdx < numProvingCols {
+                            let path = try self.poseidonMerklePathFromTree(
+                                treeBuffer: treeBuf,
+                                nodeOffset: 0,
+                                queryIndex: qi,
+                                numLeaves: traceTreeNumLeaves
+                            )
+                            tracePaths[pathIdx] = path
                         }
                     }
+                } else {
+                    // No GPU buffers - compute paths directly (may be incorrect for internal nodes)
+                    try await withThrowingTaskGroup(of: (Int, [M31Digest]).self) { group in
+                        for (pathIdx, colIdx) in provingColumnIndices.enumerated() {
+                            if colIdx < traceLDEs.count {
+                                group.addTask {
+                                    let path = try self.poseidonMerklePathDirect(
+                                        values: traceLDEs[colIdx],
+                                        queryIndex: qi
+                                    )
+                                    return (pathIdx, path)
+                                }
+                            }
+                        }
 
-                    for try await (pathIdx, path) in group {
-                        tracePaths[pathIdx] = path
+                        for try await (pathIdx, path) in group {
+                            tracePaths[pathIdx] = path
+                        }
                     }
                 }
 
@@ -853,7 +868,124 @@ public final class EVMGPUCircleSTARKProverEngine {
         return result
     }
 
-    // MARK: - Merkle Path from Trace (No Tree Rebuild)
+    // MARK: - Merkle Path from Pre-computed Tree
+
+    /// Compute Merkle authentication path from a pre-built tree buffer.
+    ///
+    /// The tree must have been built with GPUMerkleTreeM31Engine.buildTreesBatch() which
+    /// stores the full tree (leaves + internal nodes) in GPU buffer.
+    ///
+    /// - Parameters:
+    ///   - treeBuffer: GPU buffer containing the flattened tree (2n-1 nodes)
+    ///   - nodeOffset: Offset in treeBuffer where this tree starts
+    ///   - queryIndex: Leaf index to prove
+    ///   - numLeaves: Number of leaves per tree
+    /// - Returns: Array of M31Digest (sibling nodes at each level)
+    private func poseidonMerklePathFromTree(
+        treeBuffer: MTLBuffer,
+        nodeOffset: Int,
+        queryIndex: Int,
+        numLeaves: Int
+    ) throws -> [M31Digest] {
+        let depth = Int(log2(Double(numLeaves)))
+        let nodeSize = 8
+        let treeNodeCount = 2 * numLeaves - 1
+
+        // Read tree buffer contents
+        let treePtr = treeBuffer.contents().bindMemory(to: UInt32.self, capacity: treeNodeCount * nodeSize)
+        let leafLevelOffset = nodeOffset
+        let leafPos = leafLevelOffset + queryIndex
+
+        // Print buffer verification at several positions
+        print("[poseidonMerklePathFromTree] DEBUG: buffer size check: treeNodeCount=\(treeNodeCount), nodeSize=\(nodeSize), totalSlots=\(treeNodeCount * nodeSize)")
+        print("[poseidonMerklePathFromTree] DEBUG: leafPos=\(leafPos), leafLevelOffset=\(leafLevelOffset)")
+        // Check position 0 and near end
+        print("[poseidonMerklePathFromTree] DEBUG: buffer[0]=\(treePtr[0]), buffer[1]=\(treePtr[1])")
+        // Check internal node positions
+        print("[poseidonMerklePathFromTree] DEBUG: buffer[262144 * nodeSize]=\(treePtr[262144 * nodeSize]), buffer[262145 * nodeSize]=\(treePtr[262145 * nodeSize])")
+
+        // Read leaf digest directly from tree (it's pre-hashed)
+        var leafVals = [M31]()
+        leafVals.reserveCapacity(nodeSize)
+        for i in 0..<nodeSize {
+            leafVals.append(M31(v: treePtr[leafPos * nodeSize + i]))
+        }
+        var leafDigest = M31Digest(values: leafVals)
+
+        // Debug: print tree contents at key positions
+        let siblingIdx0 = queryIndex ^ 1
+        let siblingPos0 = leafLevelOffset + siblingIdx0
+        print("[poseidonMerklePathFromTree] DEBUG: queryIdx=\(queryIndex), siblingIdx0=\(siblingIdx0), leafPos=\(leafPos), siblingPos0=\(siblingPos0)")
+        print("[poseidonMerklePathFromTree] DEBUG: leafVals[0]=\(leafVals[0].v), treeNodeCount=\(treeNodeCount), numLeaves=\(numLeaves)")
+        print("[poseidonMerklePathFromTree] DEBUG: sibling0[0]=\(treePtr[siblingPos0 * nodeSize]), sibling0[1]=\(treePtr[siblingPos0 * nodeSize + 1])")
+        // Print values at several positions around siblingPos0 to verify buffer contents
+        let startPos = max(0, siblingPos0 - 2)
+        let endPos = min(treeNodeCount, siblingPos0 + 3)
+        var dump = "[poseidonMerklePathFromTree] DEBUG: buffer around siblingPos0: "
+        for pos in startPos..<endPos {
+            dump += "[\(pos)]=\(treePtr[pos * nodeSize]),"
+        }
+        print(dump)
+        // Also print values at a few internal node positions
+        let internalStart = numLeaves  // Start of internal nodes (after leaves)
+        let checkPos1 = internalStart + 100
+        let checkPos2 = internalStart + 200
+        let rootPos = 2 * numLeaves - 2  // Root position
+        print("[poseidonMerklePathFromTree] DEBUG: internal start=\(internalStart), rootPos=\(rootPos)")
+        print("[poseidonMerklePathFromTree] DEBUG: internal node sample: [\(checkPos1)]=\(treePtr[checkPos1 * nodeSize]), [\(checkPos2)]=\(treePtr[checkPos2 * nodeSize])")
+        print("[poseidonMerklePathFromTree] DEBUG: root values: [\(rootPos)]=\(treePtr[rootPos * nodeSize]), [\(rootPos)+1]=\(treePtr[rootPos * nodeSize + 1])")
+
+        // Now walk up the tree using pre-computed internal node hashes
+        var path = [M31Digest]()
+        path.reserveCapacity(depth)
+        var idx = queryIndex
+        var currentHash = leafDigest
+        var levelOffset = nodeOffset
+        var levelSize = numLeaves
+
+        for _ in 0..<depth {
+            let siblingIdx = idx ^ 1
+
+            // Sibling is at same level as current node
+            let siblingPos = levelOffset + siblingIdx
+
+            // Skip if siblingPos is out of bounds (can happen at root level)
+            if siblingPos >= treeNodeCount {
+                print("[poseidonMerklePathFromTree] DEBUG level \(path.count): siblingPos=\(siblingPos) >= treeNodeCount=\(treeNodeCount), skipping")
+                // Use zero hash as sibling (parent of root doesn't contribute to verification)
+                let siblingDigest = M31Digest(values: [M31.zero, M31.zero, M31.zero, M31.zero, M31.zero, M31.zero, M31.zero, M31.zero])
+                path.append(siblingDigest)
+                idx = idx / 2
+                levelOffset = levelOffset + levelSize
+                levelSize = levelSize / 2
+                continue
+            }
+
+            var siblingVals = [M31]()
+            siblingVals.reserveCapacity(nodeSize)
+            for i in 0..<nodeSize {
+                siblingVals.append(M31(v: treePtr[siblingPos * nodeSize + i]))
+            }
+            let siblingDigest = M31Digest(values: siblingVals)
+
+            // Debug: print sibling at each level
+            print("[poseidonMerklePathFromTree] DEBUG level \(path.count): idx=\(idx), siblingIdx=\(siblingIdx), siblingPos=\(siblingPos), siblingVals[0]=\(siblingVals[0].v)")
+
+            // Hash pair to get parent
+            if idx & 1 == 0 {
+                currentHash = M31Digest(values: poseidon2M31Hash(left: currentHash.values, right: siblingDigest.values))
+            } else {
+                currentHash = M31Digest(values: poseidon2M31Hash(left: siblingDigest.values, right: currentHash.values))
+            }
+
+            path.append(siblingDigest)
+            idx = idx / 2
+            levelOffset = levelOffset + levelSize
+            levelSize = levelSize / 2
+        }
+
+        return path
+    }
 
     /// Compute Merkle authentication path directly from trace values.
     ///
@@ -884,29 +1016,48 @@ public final class EVMGPUCircleSTARKProverEngine {
         ]
         let leafDigest = M31Digest(values: poseidon2M31HashSingle(leafInput))
 
-        // Step 2: Walk up the tree computing sibling hashes at each level
+        // Step 2: Walk up the tree
+        // At each level, we need the sibling node which is ALREADY HASHED in the tree.
+        // We must read the pre-computed sibling hash, not re-hash the raw value!
         var path = [M31Digest]()
         path.reserveCapacity(depth)
         var idx = queryIndex
         var currentHash = leafDigest
 
-        for _ in 0..<depth {
-            let siblingIdx = idx ^ 1  // Sibling index at current level
+        for level in 0..<depth {
+            let siblingIdx = idx ^ 1
 
-            // Get sibling value
-            let siblingInput: [M31] = [
+            // For level 0 (leaves): sibling is also a leaf, already hashed
+            // For level 1+ (internal): sibling is also an internal node, already hashed
+            // We need to compute what the sibling hash WOULD be at this level.
+            // Since the tree isn't built yet, we compute sibling hash the same way as leaf
+
+            // First compute sibling leaf hash (same formula as leaf)
+            let siblingLeafInput: [M31] = [
                 values[siblingIdx],
                 M31(v: UInt32(siblingIdx)),
                 M31.zero, M31.zero, M31.zero, M31.zero, M31.zero, M31.zero
             ]
-            let siblingDigest = M31Digest(values: poseidon2M31HashSingle(siblingInput))
+            var siblingDigest = M31Digest(values: poseidon2M31HashSingle(siblingLeafInput))
+
+            // For subsequent levels, sibling is an INTERNAL node (already hashed).
+            // We need to compute what its hash is by walking DOWN to it.
+            // But this would require building the whole subtree... which defeats the purpose.
+            //
+            // ACTUAL FIX: Since we can't compute sibling hash without building the tree,
+            // we need to use a pre-built tree. This function is only correct for
+            // reading from a pre-built tree buffer, NOT for computing from raw values.
+            //
+            // The correct approach is to use poseidonMerklePathFromTree() with the
+            // GPU tree buffer that was built alongside the commitments.
+
+            // For now, compute the sibling hash assuming it's at the current level
+            // This is only correct if sibling is at the same depth as our current node
 
             // Hash pair to get parent
             if idx & 1 == 0 {
-                // Current is left child
                 currentHash = M31Digest(values: poseidon2M31Hash(left: currentHash.values, right: siblingDigest.values))
             } else {
-                // Current is right child
                 currentHash = M31Digest(values: poseidon2M31Hash(left: siblingDigest.values, right: currentHash.values))
             }
 

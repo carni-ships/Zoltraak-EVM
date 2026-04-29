@@ -678,6 +678,9 @@ public struct BlockAIR: CircleAIR {
             columnsToCommit = trace
         }
 
+        var treeBufferToReturn: MTLBuffer? = nil
+        var numLeavesForBuffer = 0
+
         if commitments.isEmpty {
             do {
                 let gpuEngine = try GPUMerkleTreeM31Engine()
@@ -686,10 +689,14 @@ public struct BlockAIR: CircleAIR {
                 // Use GPUMerkleTreeM31Engine which correctly hashes leaves before building tree
                 // This is CRITICAL: EVMGPUMerkleEngine.buildTreesBatch is broken - it passes
                 // raw M31 values to poseidon2_m31_merkle_fused which expects pre-hashed digests
-                let (batchRoots, _, _) = try gpuEngine.buildTreesBatch(
+                let (batchRoots, treeBuf, nodesPerTree) = try gpuEngine.buildTreesBatch(
                     columns: columnsToCommit,
                     count: columnsToCommit[0].count
                 )
+
+                // Capture tree buffer for passing to prover (avoids rebuilding trees)
+                treeBufferToReturn = treeBuf
+                numLeavesForBuffer = columnsToCommit[0].count
 
                 // Convert M31Digest to M31 for commitment format
                 for rootDigest in batchRoots {
@@ -719,8 +726,13 @@ public struct BlockAIR: CircleAIR {
         print("[BlockAIR] commitWithTrees done: \(commitments.count) commitments")
         fflush(stdout)
 
-        // Return empty trees - prover will compute auth paths on-demand
-        return CommitResult(commitments: commitments, trees: [])
+        // Return tree buffer if we built one (enables GPU proof generation)
+        return CommitResult(
+            commitments: commitments,
+            trees: [],
+            treeBuffer: treeBufferToReturn,
+            numLeaves: numLeavesForBuffer
+        )
     }
 
     /// Compute Merkle root using CPU (slow fallback).

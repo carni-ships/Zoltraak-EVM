@@ -128,7 +128,7 @@ struct EVMNegativeTests {
 
     @Test
     func testDIV_ByZero() throws {
-        // Division by zero should revert
+        // Per EVM spec: Division by zero returns 0 without revert
         let code: [UInt8] = [
             OpcodeBytes.PUSH1, 0x0A,
             OpcodeBytes.PUSH1, 0x00,
@@ -137,12 +137,14 @@ struct EVMNegativeTests {
         ]
         let engine = createTestEngine()
         let result = try engine.execute(code: code, gasLimit: 100_000)
-        #expect(result.trace.reverted)
+        // EVM spec: DIV by zero returns 0, does NOT revert
+        #expect(!result.trace.reverted)
+        #expect(result.success)
     }
 
     @Test
     func testSDIV_ByZero() throws {
-        // Signed division by zero should revert
+        // Per EVM spec: Signed division by zero returns 0 without revert
         let code: [UInt8] = [
             OpcodeBytes.PUSH1, 0x0A,
             OpcodeBytes.PUSH1, 0x00,
@@ -151,12 +153,14 @@ struct EVMNegativeTests {
         ]
         let engine = createTestEngine()
         let result = try engine.execute(code: code, gasLimit: 100_000)
-        #expect(result.trace.reverted)
+        // EVM spec: SDIV by zero returns 0, does NOT revert
+        #expect(!result.trace.reverted)
+        #expect(result.success)
     }
 
     @Test
     func testMOD_ByZero() throws {
-        // Modulo by zero should revert
+        // Per EVM spec: Modulo by zero returns 0 without revert
         let code: [UInt8] = [
             OpcodeBytes.PUSH1, 0x0A,
             OpcodeBytes.PUSH1, 0x00,
@@ -165,12 +169,14 @@ struct EVMNegativeTests {
         ]
         let engine = createTestEngine()
         let result = try engine.execute(code: code, gasLimit: 100_000)
-        #expect(result.trace.reverted)
+        // EVM spec: MOD by zero returns 0, does NOT revert
+        #expect(!result.trace.reverted)
+        #expect(result.success)
     }
 
     @Test
     func testSMOD_ByZero() throws {
-        // Signed modulo by zero should revert
+        // Per EVM spec: Signed modulo by zero returns 0 without revert
         let code: [UInt8] = [
             OpcodeBytes.PUSH1, 0x0A,
             OpcodeBytes.PUSH1, 0x00,
@@ -179,12 +185,14 @@ struct EVMNegativeTests {
         ]
         let engine = createTestEngine()
         let result = try engine.execute(code: code, gasLimit: 100_000)
-        #expect(result.trace.reverted)
+        // EVM spec: SMOD by zero returns 0, does NOT revert
+        #expect(!result.trace.reverted)
+        #expect(result.success)
     }
 
     @Test
     func testADDMOD_ByZero() throws {
-        // ADDMOD with modulus 0 should revert
+        // Per EVM spec: ADDMOD with modulus 0 returns 0 without revert
         let code: [UInt8] = [
             OpcodeBytes.PUSH1, 0x05,
             OpcodeBytes.PUSH1, 0x07,
@@ -194,12 +202,14 @@ struct EVMNegativeTests {
         ]
         let engine = createTestEngine()
         let result = try engine.execute(code: code, gasLimit: 100_000)
-        #expect(result.trace.reverted)
+        // EVM spec: ADDMOD with modulus 0 returns 0, does NOT revert
+        #expect(!result.trace.reverted)
+        #expect(result.success)
     }
 
     @Test
     func testMULMOD_ByZero() throws {
-        // MULMOD with modulus 0 should revert
+        // Per EVM spec: MULMOD with modulus 0 returns 0 without revert
         let code: [UInt8] = [
             OpcodeBytes.PUSH1, 0x05,
             OpcodeBytes.PUSH1, 0x07,
@@ -209,15 +219,16 @@ struct EVMNegativeTests {
         ]
         let engine = createTestEngine()
         let result = try engine.execute(code: code, gasLimit: 100_000)
-        #expect(result.trace.reverted)
+        // EVM spec: MULMOD with modulus 0 returns 0, does NOT revert
+        #expect(!result.trace.reverted)
+        #expect(result.success)
     }
 
     // MARK: - Invalid Jump Tests
 
     @Test
     func testJUMP_InvalidDestination() throws {
-        // Jump to a position that is not a JUMPDEST
-        // TODO: Currently the EVM does NOT validate JUMPDEST - this is a known gap
+        // Jump to a position that is not a JUMPDEST - should revert
         let code: [UInt8] = [
             OpcodeBytes.PUSH1, 0x05,  // Jump target
             OpcodeBytes.JUMP,
@@ -229,9 +240,8 @@ struct EVMNegativeTests {
         ]
         let engine = createTestEngine()
         let result = try engine.execute(code: code, gasLimit: 100_000)
-        // Currently the EVM does not validate JUMPDEST, so it succeeds
-        // This test documents the current behavior - fix JUMPDEST validation to make it revert
-        #expect(!result.trace.reverted)  // Document current (buggy) behavior
+        // Per EVM spec: JUMP to non-JUMPDEST should revert
+        #expect(result.trace.reverted)
     }
 
     @Test

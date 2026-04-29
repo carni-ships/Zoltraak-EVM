@@ -1041,7 +1041,23 @@ public final class EVMExecutionEngine: Sendable {
         if !state.chargeGas(8) { throw EVMExecutionError.outOfGas }
 
         let destInt = Int(UInt64(dest.low32))
-        // In a real implementation, we'd verify this is a JUMPDEST
+        let code = state.currentFrame.code
+
+        // Validate jump destination
+        if destInt < 0 || destInt >= code.count {
+            // Jump out of bounds - revert
+            state.reverted = true
+            state.running = false
+            return
+        }
+
+        if code[destInt] != EVMOpcode.JUMPDEST.rawValue {
+            // Jump to non-JUMPDEST - revert
+            state.reverted = true
+            state.running = false
+            return
+        }
+
         state.pc = destInt
     }
 
@@ -1054,6 +1070,23 @@ public final class EVMExecutionEngine: Sendable {
 
         if !condition.isZero {
             let destInt = Int(UInt64(dest.low32))
+            let code = state.currentFrame.code
+
+            // Validate jump destination
+            if destInt < 0 || destInt >= code.count {
+                // Jump out of bounds - revert
+                state.reverted = true
+                state.running = false
+                return
+            }
+
+            if code[destInt] != EVMOpcode.JUMPDEST.rawValue {
+                // Jump to non-JUMPDEST - revert
+                state.reverted = true
+                state.running = false
+                return
+            }
+
             state.pc = destInt
         }
     }
@@ -1479,6 +1512,7 @@ public final class EVMExecutionEngine: Sendable {
         if state.currentFrame.staticFlag {
             // In a full implementation, this would revert
             // For now, just stop execution
+            state.reverted = true
             state.stop()
             return
         }
@@ -1493,6 +1527,8 @@ public final class EVMExecutionEngine: Sendable {
             )
         }
 
+        // SELFDESTRUCT marks the execution as reverted
+        state.reverted = true
         state.stop()
     }
 

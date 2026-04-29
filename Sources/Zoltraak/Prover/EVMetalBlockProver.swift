@@ -403,6 +403,8 @@ public final class ZoltraakBlockProver {
 
         let commitments = commitResult.commitments
         let traceTrees = commitResult.trees
+        let treeBuffer = commitResult.treeBuffer
+        let treeNumLeaves = commitResult.numLeaves
 
         // Phase 6: Constraint evaluation
         let constraintStart = CFAbsoluteTimeGetCurrent()
@@ -424,7 +426,9 @@ public final class ZoltraakBlockProver {
                 air: air,
                 traceLDEs: traceLDEs,
                 precomputedCommitments: commitments,
-                precomputedTrees: traceTrees
+                precomputedTrees: traceTrees,
+                precomputedTreeBuffer: treeBuffer,
+                precomputedTreeNumLeaves: treeNumLeaves
             )
             starkProofData = serializeGPUSTARKProof(gpuResult.proof)
             friMs = gpuResult.totalTimeSeconds * 1000
@@ -773,6 +777,8 @@ public final class ZoltraakBlockProver {
         // Extract commitment results
         let commitments = commitResult.commitments
         let traceTrees = commitResult.trees
+        let treeBuffer = commitResult.treeBuffer
+        let treeNumLeaves = commitResult.numLeaves
 
         // Phase 6: Constraint evaluation with correct challenges
         let constraintStart = CFAbsoluteTimeGetCurrent()
@@ -813,7 +819,9 @@ public final class ZoltraakBlockProver {
                     air: air,
                     traceLDEs: traceLDEs,
                     precomputedCommitments: commitments,
-                    precomputedTrees: traceTrees
+                    precomputedTrees: traceTrees,
+                    precomputedTreeBuffer: treeBuffer,
+                    precomputedTreeNumLeaves: treeNumLeaves
                 )
                 starkProofData = serializeGPUSTARKProof(gpuResult.proof)
                 friMs = gpuResult.totalTimeSeconds * 1000
