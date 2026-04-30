@@ -646,9 +646,9 @@ public struct ProverTests {
 
             // Build trees with GPU proof support (keeps tree buffer)
             print("  Building trees with GPU proof support...")
-            let (roots, treeBuffer, numLeaves) = try merkleEngine.buildTreesWithGPUProof(
+            let (roots, treeBuffer, numLeaves) = try merkleEngine.buildTreesWithGPUProofFromPrehashed(
                 treesLeaves: treesLeaves,
-                keepTreeBuffer: true
+                numLeaves: leavesPerTree
             )
 
             assert(roots.count == 4, "Should have 4 roots")

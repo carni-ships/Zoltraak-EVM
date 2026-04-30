@@ -249,9 +249,9 @@ public final class EVMGPUSideProver {
         }
 
         // GPU build with proof support (keeps tree structure in VRAM)
-        let (roots, maybeTreeBuffer, numLeaves) = try gpuMerkleEngine.buildTreesWithGPUProof(
+        let (roots, maybeTreeBuffer, numLeaves) = try gpuMerkleEngine.buildTreesWithGPUProofFromPrehashed(
             treesLeaves: treesLeaves,
-            keepTreeBuffer: true
+            numLeaves: evalLen
         )
 
         let commitMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000

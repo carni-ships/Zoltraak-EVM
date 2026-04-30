@@ -935,37 +935,8 @@ public final class ZoltraakGPUProver {
 
         print("    [GPU Prover] commitTraceColumnsWithGPUProof: numColumns=\(numColumns), evalLen=\(evalLen)")
 
-        // Pre-hash leaves if needed
-        var treesLeaves: [[M31]]
-
-        if m31PerLeaf == 8 {
-            // Data is already in pre-hashed node format
-            treesLeaves = traceLDEs.map { Array($0.prefix(evalLen * 8)) }
-        } else {
-            // Need to hash leaves with position
-            print("    [GPU Prover] Hashing leaves with position...")
-            let leafHashT0 = CFAbsoluteTimeGetCurrent()
-
-            // Flatten values
-            var flatValues: [M31] = []
-            flatValues.reserveCapacity(numColumns * evalLen)
-            for col in traceLDEs {
-                flatValues.append(contentsOf: col)
-            }
-
-            // CPU hash with position (fast on multi-core CPU)
-            let allDigests = cpuProver.hashLeavesBatchPerColumn(
-                allValues: flatValues,
-                numColumns: numColumns,
-                countPerColumn: evalLen
-            )
-
-            treesLeaves = allDigests
-            let leafHashMs = (CFAbsoluteTimeGetCurrent() - leafHashT0) * 1000
-            print("    [GPU Prover] Leaf hashing: \(String(format: "%.1f", leafHashMs))ms")
-        }
-
         // Build trees with GPU proof support
+        // Use the correct GPU path based on whether data is pre-hashed or raw
         print("    [GPU Prover] Building trees with GPU proof support...")
         let treeBuildT0 = CFAbsoluteTimeGetCurrent()
 
@@ -973,10 +944,24 @@ public final class ZoltraakGPUProver {
             throw GPUProverError.gpuError("Merkle engine not available")
         }
 
-        let (roots, treeBuffer, numLeaves) = try merkleEng.buildTreesWithGPUProof(
-            treesLeaves: treesLeaves,
-            keepTreeBuffer: keepTreeBuffer
-        )
+        let (roots, treeBuffer, numLeaves): ([zkMetal.M31Digest], MTLBuffer?, Int)
+
+        if m31PerLeaf == 8 {
+            // Data is already in pre-hashed node format (8 M31 per leaf digest).
+            // Use buildTreesBatchFromPrehashedGPU to build trees without re-hashing.
+            let treesLeaves = traceLDEs.map { Array($0.prefix(evalLen * 8)) }
+            (roots, treeBuffer, numLeaves) = try merkleEng.buildTreesWithGPUProofFromPrehashed(
+                treesLeaves: treesLeaves,
+                numLeaves: evalLen
+            )
+        } else {
+            // Raw M31 values need hashing. Use GPU batch hashing (buildTreesBatchGPU).
+            // This is the same approach as the GPU commitment path.
+            (roots, treeBuffer, numLeaves) = try merkleEng.buildTreesWithGPUProofFromRaw(
+                traceLDEs: traceLDEs,
+                evalLen: evalLen
+            )
+        }
 
         let treeBuildMs = (CFAbsoluteTimeGetCurrent() - treeBuildT0) * 1000
         let elapsed = (CFAbsoluteTimeGetCurrent() - t0) * 1000
@@ -997,7 +982,7 @@ public final class ZoltraakGPUProver {
     /// to generate proofs directly on GPU without CPU tree rebuilding.
     ///
     /// - Parameters:
-    ///   - treeBuffer: GPU buffer containing flattened tree structure.
+    ///   - treeBuffer: GPU buffer containing tree-first layout from buildTreesWithGPUProof.
     ///   - numColumns: Number of columns/trees.
     ///   - numLeaves: Number of leaves per tree.
     ///   - queryIndices: Array of leaf indices to generate proofs for (one per column).
@@ -1013,7 +998,7 @@ public final class ZoltraakGPUProver {
             throw GPUProverError.gpuError("Merkle engine not available")
         }
 
-        return try merkleEng.generateProofsGPU(
+        return try merkleEng.generateProofsFromTreeFirst(
             treeBuffer: treeBuffer,
             numTrees: numColumns,
             numLeaves: numLeaves,

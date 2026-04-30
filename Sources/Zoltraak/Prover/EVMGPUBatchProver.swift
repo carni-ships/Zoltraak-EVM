@@ -214,9 +214,9 @@ public final class EVMGPUBatchProver {
                 )
 
                 // Build trees with GPU (no leaf hashing needed)
-                let (roots, treeBuf, numLeaves) = try merkleEng.buildTreesWithGPUProof(
+                let (roots, treeBuf, numLeaves) = try merkleEng.buildTreesWithGPUProofFromPrehashed(
                     treesLeaves: treesLeaves,
-                    keepTreeBuffer: true
+                    numLeaves: evalLen
                 )
                 traceCommitments = roots
                 gpuTreeBuffer = treeBuf
@@ -228,9 +228,9 @@ public final class EVMGPUBatchProver {
                     treesLeaves.append(Array(col.prefix(evalLen * 8)))
                 }
 
-                let (roots, treeBuf, numLeaves) = try merkleEng.buildTreesWithGPUProof(
+                let (roots, treeBuf, numLeaves) = try merkleEng.buildTreesWithGPUProofFromPrehashed(
                     treesLeaves: treesLeaves,
-                    keepTreeBuffer: true
+                    numLeaves: evalLen
                 )
                 traceCommitments = roots
                 gpuTreeBuffer = treeBuf

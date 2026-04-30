@@ -689,7 +689,8 @@ public struct BlockAIR: CircleAIR {
                 // Use GPUMerkleTreeM31Engine which correctly hashes leaves before building tree
                 // This is CRITICAL: EVMGPUMerkleEngine.buildTreesBatch is broken - it passes
                 // raw M31 values to poseidon2_m31_merkle_fused which expects pre-hashed digests
-                let (batchRoots, treeBuf, nodesPerTree) = try gpuEngine.buildTreesBatch(
+                // buildTreesBatchGPU uses batched internal node processing (all trees at once per level)
+                let (batchRoots, treeBuf, nodesPerTree) = try gpuEngine.buildTreesBatchGPU(
                     columns: columnsToCommit,
                     count: columnsToCommit[0].count
                 )

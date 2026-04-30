@@ -1038,3 +1038,113 @@ kernel void poseidon2_m31_merkle_tree_upper_batch(
         output[outOffset + i] = s[i].v;
     }
 }
+
+// =============================================================================
+// TREE-FIRST MERKLE PROOF GENERATION KERNEL
+// =============================================================================
+//
+// INPUT FORMAT (tree-first layout from buildTreesBatchGPU):
+//   treeBuffer contains numTrees trees stored sequentially, each with:
+//     - Leaves: stored compactly by tree (tree 0 at indices 0..n-1, tree 1 at n..2n-1)
+//       Byte offset = treeIdx * n * nodeSize * stride
+//     - Internal nodes: stored sequentially after all leaves of a tree
+//
+//   Tree structure per tree:
+//     Tree 0 leaves: indices 0..n-1 (byte offset 0)
+//     Tree 1 leaves: indices n..2n-1 (byte offset treeIdx * n * nodeSize * stride)
+//     ...etc
+//
+//   Internal nodes: Stored sequentially tree by tree (no per-tree gaps)
+//     Tree 0 level 1: indices n..(n+n/2-1)
+//     Tree 1 level 1: follows immediately after tree 0 level 1
+//     ...etc
+//
+//   Total nodes per tree: treeSize = 2*n - 1 (n leaves + n-1 internal)
+//   Total buffer size: numTrees * treeSize * nodeSize * stride bytes
+//
+//   Each node is 8 M31 elements (nodeSize=8, stride=4 bytes per UInt32)
+//
+// OUTPUT FORMAT (standard flat, same as poseidon2_m31_merkle_proof_batch):
+//   proofBuffer: [proof0_path, proof1_path, ...]
+//   Each proof has numLevels * 8 M31 elements (one 8-element sibling per level)
+//
+// NOTE: This kernel handles the layout produced by buildTreesBatchGPU where
+//   leaves are compacted by tree and internal nodes are sequential.
+
+kernel void poseidon2_m31_merkle_proof_batch_treefirst(
+    device const uint* treeBuffer    [[buffer(0)]],
+    device uint* proofBuffer           [[buffer(1)]],
+    constant uint& numTrees           [[buffer(2)]],
+    constant uint& leavesPerTree      [[buffer(3)]],
+    constant uint* queryIndices       [[buffer(4)]],
+    uint gid                           [[thread_position_in_grid]]
+) {
+    uint treeIdx = gid;
+    if (treeIdx >= numTrees) return;
+
+    uint n = leavesPerTree;
+    uint nodeSize = 8;        // M31 elements per digest
+    uint stride = 4;          // bytes per UInt32
+
+    // Calculate numLevels from leavesPerTree
+    uint numLevels = 0;
+    uint temp = n;
+    while (temp > 1) {
+        temp >>= 1;
+        numLevels++;
+    }
+
+    // Tree base byte offset for LEAVES (compacted layout):
+    // Each tree's leaves are stored compactly: tree 0 at 0..n-1, tree 1 at n..2n-1
+    // Byte offset = treeIdx * n * nodeSize * stride
+    uint treeBaseLeaves = treeIdx * n * nodeSize * stride;
+
+    // Query index for this tree (leaf index to prove)
+    uint queryIdx = queryIndices[treeIdx];
+
+    // Proof starting offset in proofBuffer (flat output format)
+    uint proofStart = treeIdx * numLevels * nodeSize;
+
+    // Traverse tree levels to generate proof siblings
+    uint currentIdx = queryIdx;
+    // Level start (node index within tree section, starts at 0 for leaves)
+    uint levelStart = 0;
+    // Previous level's node count (starts at n for leaves)
+    uint prevLevelSize = n;
+
+    for (uint level = 0; level < numLevels; level++) {
+        // Get sibling index at this level (XOR with 1 flips last bit)
+        uint siblingIdx = currentIdx ^ 1;
+
+        // Compute sibling byte offset:
+        // - For level 0 (leaves): sibling at treeBaseLeaves + siblingIdx * nodeSize * stride
+        // - For internal levels: sibling at treeBaseLeaves + levelStart * nodeSize * stride + siblingIdx * nodeSize * stride
+        uint siblingByteOffset;
+        if (level == 0) {
+            // Level 0: leaves are stored compactly at treeBaseLeaves
+            siblingByteOffset = treeBaseLeaves + siblingIdx * nodeSize * stride;
+        } else {
+            // Internal levels: stored sequentially after leaves within tree section
+            // levelStart tracks the node index where current level starts within tree
+            // sibling is at levelStart + siblingIdx within the current level
+            uint levelBase = levelStart * nodeSize * stride;
+            siblingByteOffset = treeBaseLeaves + levelBase + siblingIdx * nodeSize * stride;
+        }
+
+        // Output position for this level's sibling (flat format)
+        uint outPos = proofStart + level * nodeSize;
+
+        // Copy 8 M31 elements from sibling to proof output
+        for (uint i = 0; i < nodeSize; i++) {
+            proofBuffer[outPos + i] = treeBuffer[(siblingByteOffset / stride) + i];
+        }
+
+        // Move to parent level:
+        // - levelStart: advance by current level's node count
+        levelStart += prevLevelSize;
+        // - prevLevelSize: halve for next level (internal nodes halve each level)
+        prevLevelSize >>= 1;
+        // - currentIdx: move to parent index (integer division by 2)
+        currentIdx >>= 1;
+    }
+}

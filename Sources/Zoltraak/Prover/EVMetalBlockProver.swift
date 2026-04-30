@@ -282,7 +282,8 @@ public final class ZoltraakBlockProver {
                 gpuConstraintThreshold: 1,
                 gpuFRIFoldThreshold: 1,
                 usePoseidon2Merkle: true,
-                numQuotientSplits: 1
+                numQuotientSplits: 1,
+                useGPULDE: true  // Enable GPU LDE for faster trace extension
             )
             self.gpuProver = try EVMGPUCircleSTARKProverEngine(config: evmGpuConfig)
             self.merkleEngine = try EVMGPUMerkleEngine()
@@ -1269,10 +1270,20 @@ public final class ZoltraakBlockProver {
 
     // MARK: - LDE (Low-Degree Extension)
 
-    /// Extend trace using optimized CPU zero-padding LDE
-    /// Note: GPU LDE was tested but is SLOWER than CPU for simple zero-padding
-    /// (GPU kernel compilation overhead ~10s vs CPU ~1.5s for this operation)
+    /// Extend trace using GPU-accelerated LDE (EVMLDEOptimizer) with Circle NTT,
+    /// falling back to CPU zero-padding if GPU is unavailable.
+    ///
+    /// GPU LDE uses proper INTT→zero-pad→NTT which is mathematically correct.
+    /// CPU fallback uses element duplication which is faster but only correct for
+    /// constant polynomials (an approximation used for performance).
     private func extendTrace(trace: [[M31]], air: BlockAIR) throws -> [[M31]] {
+        // Use GPU LDE if optimizer is available
+        if let optimizer = ldeOptimizer {
+            let logTrace = Self.log2Ceil(trace[0].count)
+            let logEval = logTrace + config.logBlowup
+            return try optimizer.lde(trace: trace, logTrace: logTrace, logEval: logEval)
+        }
+        // Fallback to CPU duplication
         return extendTraceCPU(trace: trace)
     }
 

@@ -66,6 +66,9 @@ import zkMetal
     /// GPU SIMD-optimized proof generation kernel
     private let simdProofGenFunction: MTLComputePipelineState
 
+    /// GPU tree-first batch proof kernel - reads tree-first layout from buildTreesBatchGPU
+    private let treeFirstProofGenFunction: MTLComputePipelineState?
+
     /// GPU leaf hashing kernel with position (for GPU-only pipeline)
     private let leafHashFunction: MTLComputePipelineState
 
@@ -250,6 +253,15 @@ import zkMetal
         self.proofGenFunction = try Self.compileProofKernel(device: device, library: upperBatchLibrary, name: "poseidon2_m31_merkle_proof_generator")
         self.batchProofGenFunction = try Self.compileProofKernel(device: device, library: upperBatchLibrary, name: "poseidon2_m31_merkle_proof_batch")
         self.simdProofGenFunction = try Self.compileProofKernel(device: device, library: upperBatchLibrary, name: "poseidon2_m31_merkle_proof_batch_simd")
+
+        // Tree-first layout proof kernel (for tree-first buffers from buildTreesBatchGPU)
+        if let tfFn = upperBatchLibrary.makeFunction(name: "poseidon2_m31_merkle_proof_batch_treefirst") {
+            self.treeFirstProofGenFunction = try device.makeComputePipelineState(function: tfFn)
+            fputs("[EVMGPUMerkleEngine] poseidon2_m31_merkle_proof_batch_treefirst kernel loaded\n", stderr)
+        } else {
+            self.treeFirstProofGenFunction = nil
+            fputs("[EVMGPUMerkleEngine] Warning: poseidon2_m31_merkle_proof_batch_treefirst kernel not found\n", stderr)
+        }
 
         // GPU leaf hashing kernel (from Zoltraak's shader)
         let leafHashLibrary = try Self.compileLeafHashShaders(device: device)
@@ -1221,22 +1233,74 @@ import zkMetal
 
     /// Build Merkle trees on GPU and keep the flattened tree structure for GPU proof generation.
     ///
-    /// This method builds trees AND stores the complete tree structure in GPU buffers,
-    /// enabling GPU-side proof generation without CPU tree rebuilding.
+    /// This method builds trees using GPUMerkleTreeM31Engine (zkMetal) and stores the
+    /// tree structure in GPU buffers, enabling GPU-side proof generation.
+    ///
+    /// The tree buffer uses TREE-FIRST layout (levels grouped per tree).
+    /// Use generateProofsFromTreeFirst() to generate proofs from this buffer.
     ///
     /// - Parameters:
     ///   - treesLeaves: Array of leaf arrays, one per tree (8 M31 elements per leaf node)
-    ///   - keepTreeBuffer: If true, keeps the flattened tree structure in GPU memory
-    /// - Returns: Tuple of (roots, treeBuffer, numLeaves) where treeBuffer contains the flattened tree
-    public func buildTreesWithGPUProof(
+    ///   - numLeaves: Number of leaves per tree
+    /// - Returns: Tuple of (roots, treeBuffer, numLeaves) where treeBuffer contains the tree-first layout
+    public func buildTreesWithGPUProofFromPrehashed(
         treesLeaves: [[M31]],
-        keepTreeBuffer: Bool = true
+        numLeaves: Int
     ) throws -> (roots: [zkMetal.M31Digest], treeBuffer: MTLBuffer?, numLeaves: Int) {
-        // This function is deprecated - use GPUMerkleTreeM31Engine for tree building
-        // and CPU for proof generation instead
-        // Return empty to signal CPU fallback should be used
-        fputs("[EVMGPUMerkleEngine] DEPRECATED: buildTreesWithGPUProof called - using CPU fallback\n", stderr)
-        return ([], nil, 0)
+        // Use GPUMerkleTreeM31Engine (zkMetal) to build trees from pre-hashed digests
+        // This produces tree-first layout buffer compatible with generateProofsFromTreeFirst
+        let gpuEngine = try GPUMerkleTreeM31Engine()
+
+        guard !treesLeaves.isEmpty else {
+            return ([], nil, 0)
+        }
+
+        let numTrees = treesLeaves.count
+
+        // Each tree's leaves are already pre-hashed (8 M31 elements per digest).
+        // Use buildTreesBatchFromPrehashedGPU which copies digests directly without re-hashing.
+        let (roots, treeBuf, nodesPerTree) = try gpuEngine.buildTreesBatchFromPrehashedGPU(
+            columns: treesLeaves,
+            count: numLeaves
+        )
+
+        fputs("[EVMGPUMerkleEngine] buildTreesWithGPUProofFromPrehashed: \(numTrees) trees x \(numLeaves) leaves, buffer size \(treeBuf.length) bytes\n", stderr)
+
+        return (roots, treeBuf, numLeaves)
+    }
+
+    /// Build Merkle trees from raw M31 values using GPU, with tree buffer preserved for GPU proof generation.
+    ///
+    /// This function hashes raw values on GPU and builds the complete tree structure.
+    /// Use generateProofsFromTreeFirst() to generate proofs from the resulting buffer.
+    ///
+    /// - Parameters:
+    ///   - traceLDEs: Array of raw M31 value arrays, one per column/tree
+    ///   - evalLen: Number of leaves per tree
+    /// - Returns: Tuple of (roots, treeBuffer, numLeaves) where treeBuffer contains the tree-first layout
+    public func buildTreesWithGPUProofFromRaw(
+        traceLDEs: [[M31]],
+        evalLen: Int
+    ) throws -> (roots: [zkMetal.M31Digest], treeBuffer: MTLBuffer?, numLeaves: Int) {
+        // Use GPUMerkleTreeM31Engine (zkMetal) to build trees with GPU
+        // This hashes raw values and builds tree-first layout buffer
+        let gpuEngine = try GPUMerkleTreeM31Engine()
+
+        guard !traceLDEs.isEmpty else {
+            return ([], nil, 0)
+        }
+
+        let numTrees = traceLDEs.count
+
+        // buildTreesBatchGPU hashes raw values and builds complete tree
+        let (roots, treeBuf, nodesPerTree) = try gpuEngine.buildTreesBatchGPU(
+            columns: traceLDEs,
+            count: evalLen
+        )
+
+        fputs("[EVMGPUMerkleEngine] buildTreesWithGPUProofFromRaw: \(numTrees) trees x \(evalLen) leaves, buffer size \(treeBuf.length) bytes\n", stderr)
+
+        return (roots, treeBuf, evalLen)
     }
 
     /// Build small trees (<= subtreeMax) with GPU proof support.
@@ -1757,6 +1821,115 @@ import zkMetal
         let proof = generateProof(tree: tree, n: numLeaves, index: queryIndex)
 
         return (root, proof)
+    }
+
+    // MARK: - Tree-First Layout Proof Generation
+
+    /// Generate Merkle proofs reading from TREE-FIRST layout buffer.
+    ///
+    /// This method generates proofs from a tree-first layout buffer produced by
+    /// buildTreesBatchGPU (zkMetal). It outputs proofs in the standard flat
+    /// format expected by the verifier.
+    ///
+    /// Use this when:
+    /// - buildTreesBatchGPU was used to build the trees (produces tree-first layout)
+    /// - You need GPU proof generation (not CPU fallback)
+    ///
+    /// - Parameters:
+    ///   - treeBuffer: GPU buffer with tree-first layout from buildTreesBatchGPU
+    ///   - numTrees: Number of trees
+    ///   - numLeaves: Number of leaves per tree
+    ///   - queryIndices: Array of leaf indices to generate proofs for
+    /// - Returns: Array of proof paths, one per tree
+    public func generateProofsFromTreeFirst(
+        treeBuffer: MTLBuffer,
+        numTrees: Int,
+        numLeaves: Int,
+        queryIndices: [Int]
+    ) throws -> [[zkMetal.M31Digest]] {
+        // Check if tree-first kernel is available
+        guard let tfKernel = treeFirstProofGenFunction else {
+            throw GPUProverError.gpuError("Tree-first proof kernel not available")
+        }
+
+        let nodeSize = 8
+        let stride = MemoryLayout<UInt32>.stride
+
+        // Calculate number of levels from leavesPerTree
+        var numLevels = 0
+        var temp = numLeaves
+        while temp > 1 {
+            temp >>= 1
+            numLevels += 1
+        }
+
+        // Allocate output buffer for proofs (flat format output)
+        let proofSize = numLevels * nodeSize
+        let proofBufSize = numTrees * proofSize * stride
+
+        guard let proofBuf = device.makeBuffer(length: proofBufSize, options: .storageModeShared) else {
+            throw GPUProverError.gpuError("Failed to allocate proof buffer")
+        }
+
+        // Prepare query indices buffer
+        guard let queryBuf = device.makeBuffer(length: numTrees * stride, options: .storageModeShared) else {
+            throw GPUProverError.gpuError("Failed to allocate query indices buffer")
+        }
+
+        let queryPtr = queryBuf.contents().bindMemory(to: UInt32.self, capacity: numTrees)
+        for (i, idx) in queryIndices.enumerated() {
+            queryPtr[i] = UInt32(idx)
+        }
+
+        // Dispatch tree-first GPU proof generation kernel
+        guard let cmdBuf = commandQueue.makeCommandBuffer() else {
+            throw GPUProverError.noCommandBuffer
+        }
+
+        let enc = cmdBuf.makeComputeCommandEncoder()!
+
+        enc.setComputePipelineState(tfKernel)
+        enc.setBuffer(treeBuffer, offset: 0, index: 0)
+        enc.setBuffer(proofBuf, offset: 0, index: 1)
+        var numTreesVal = UInt32(numTrees)
+        enc.setBytes(&numTreesVal, length: 4, index: 2)
+        var numLeavesVal = UInt32(numLeaves)
+        enc.setBytes(&numLeavesVal, length: 4, index: 3)
+        enc.setBuffer(queryBuf, offset: 0, index: 4)
+
+        enc.dispatchThreadgroups(
+            MTLSize(width: numTrees, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
+        )
+
+        enc.endEncoding()
+        cmdBuf.commit()
+        try waitAndCheckError(cmdBuf, operation: "generateProofsFromTreeFirst")
+
+        // Read back proofs
+        let proofPtr = proofBuf.contents().bindMemory(to: UInt32.self, capacity: numTrees * proofSize)
+        var proofs: [[zkMetal.M31Digest]] = []
+        proofs.reserveCapacity(numTrees)
+
+        for treeIdx in 0..<numTrees {
+            var path: [zkMetal.M31Digest] = []
+            path.reserveCapacity(numLevels)
+
+            for level in 0..<numLevels {
+                var values: [M31] = []
+                values.reserveCapacity(nodeSize)
+                let baseIdx = treeIdx * proofSize + level * nodeSize
+
+                for i in 0..<nodeSize {
+                    values.append(M31(v: proofPtr[baseIdx + i]))
+                }
+                path.append(zkMetal.M31Digest(values: values))
+            }
+
+            proofs.append(path)
+        }
+
+        return proofs
     }
 }
 

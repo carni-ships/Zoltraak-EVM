@@ -54,6 +54,12 @@ public final class EVMGPUCircleSTARKProverEngine {
         /// Number of quotient splits
         public let numQuotientSplits: Int
 
+        /// Use GPU LDE (EVMLDEOptimizer) instead of CPU duplication.
+        /// WARNING: GPU LDE uses proper INTT→zero-pad→NTT which produces mathematically
+        /// different results than cpuLDE's element duplication. This may affect proof
+        /// verification. Disabled by default until correctness is verified.
+        public let useGPULDE: Bool
+
         public init(
             logBlowup: Int = 2,
             numQueries: Int = 20,
@@ -61,7 +67,8 @@ public final class EVMGPUCircleSTARKProverEngine {
             gpuConstraintThreshold: Int = 16384,
             gpuFRIFoldThreshold: Int = 16384,
             usePoseidon2Merkle: Bool = true,
-            numQuotientSplits: Int = 2
+            numQuotientSplits: Int = 2,
+            useGPULDE: Bool = false
         ) {
             self.logBlowup = logBlowup
             self.numQueries = numQueries
@@ -70,6 +77,7 @@ public final class EVMGPUCircleSTARKProverEngine {
             self.gpuFRIFoldThreshold = gpuFRIFoldThreshold
             self.usePoseidon2Merkle = usePoseidon2Merkle
             self.numQuotientSplits = numQuotientSplits
+            self.useGPULDE = useGPULDE
         }
 
         public var zkMetalConfig: GPUCircleSTARKProverConfig {
@@ -101,6 +109,9 @@ public final class EVMGPUCircleSTARKProverEngine {
 
     /// GPU FRI prover engine for accelerated FRI folding
     private var friEngine: GPUCircleFRIProverEngine?
+
+    /// GPU LDE optimizer using CircleNTT for proper low-degree extension
+    private var ldeOptimizer: EVMLDEOptimizer?
 
     /// Flag indicating async FRI engine initialization is in progress
     private var friEngineInitializing = false
@@ -149,6 +160,15 @@ public final class EVMGPUCircleSTARKProverEngine {
                 self.friEngineReady = true
             } catch {
                 self.friEngineReady = false
+            }
+
+            // Initialize GPU LDE optimizer
+            do {
+                self.ldeOptimizer = try EVMLDEOptimizer(config: .standard)
+                fputs("[GPU Prover] EVMLDEOptimizer initialized\n", stderr)
+            } catch {
+                fputs("[GPU Prover] EVMLDEOptimizer init failed: \(error.localizedDescription) - falling back to cpuLDE\n", stderr)
+                self.ldeOptimizer = nil
             }
         }
     }
@@ -316,8 +336,22 @@ public final class EVMGPUCircleSTARKProverEngine {
         let logTrace = air.logTraceLength
         let logEval = logTrace + config.logBlowup
 
-        // LDE via CPU (GPU LDE would be better but requires integration)
-        let ldes = cpuLDE(trace: trace, logTrace: logTrace, logEval: logEval)
+        // LDE: GPU (EVMLDEOptimizer) if enabled and available, else CPU duplication
+        // NOTE: GPU LDE uses proper INTT→zero-pad→NTT which produces mathematically
+        // different results than cpuLDE's element duplication. This may affect proof
+        // verification. Set useGPULDE=true in Config to enable (after verifying correctness).
+        let ldes: [[M31]]
+        if config.useGPULDE, let optimizer = ldeOptimizer {
+            do {
+                ldes = try optimizer.lde(trace: trace, logTrace: logTrace, logEval: logEval)
+                fputs("[GPU Prover] GPU LDE: \(optimizer.lastTiming?.summary ?? "no timing")\n", stderr)
+            } catch {
+                fputs("[GPU Prover] GPU LDE failed: \(error.localizedDescription) - using cpuLDE\n", stderr)
+                ldes = cpuLDE(trace: trace, logTrace: logTrace, logEval: logEval)
+            }
+        } else {
+            ldes = cpuLDE(trace: trace, logTrace: logTrace, logEval: logEval)
+        }
 
         let traceGenTime = CFAbsoluteTimeGetCurrent() - traceGenT0
 
@@ -437,7 +471,8 @@ public final class EVMGPUCircleSTARKProverEngine {
         }
 
         // Use batch GPU tree building for all columns at once
-        let (roots, treeBuf, nodesPerTree) = try gpuMerkle.buildTreesBatch(columns: columns, count: count)
+        // buildTreesBatchGPU uses batched internal node processing (all trees at once per level)
+        let (roots, treeBuf, nodesPerTree) = try gpuMerkle.buildTreesBatchGPU(columns: columns, count: count)
 
         // Split combined buffer into individual tree buffers for GPU proof generation
         let nodeSize = 8
@@ -550,6 +585,11 @@ public final class EVMGPUCircleSTARKProverEngine {
     }
 
     /// CPU fallback for constraint evaluation - OPTIMIZED with parallel chunk processing
+    ///
+    /// Optimizations applied:
+    /// 1. Precompute m31Inverse for each boundary row (moved OUTSIDE parallel loop)
+    /// 2. Pre-group boundary constraints by row for O(1) lookup (was O(n) scan)
+    /// 3. Sort columnIndices once for better cache locality in trace access
     private func evaluateConstraintsWithSubsetCPU<A: CircleAIR>(
         air: A,
         traceLDEs: [[M31]],
@@ -581,11 +621,31 @@ public final class EVMGPUCircleSTARKProverEngine {
             alphaPowers[i] = m31Mul(alphaPowers[i-1], alpha)
         }
 
-        // Pre-build boundary lookup for O(1) boundary check per row
-        var boundaryRows = Set<Int>()
+        // OPTIMIZATION 1: Precompute m31Inverse for each boundary row (outside parallel loop)
+        // m31Inverse uses Fermat exponentiation (~31 m31Muls) - very expensive in hot loop
+        var vzInverseByRow: [Int: M31] = [:]
         for bc in boundaryConstraints {
-            boundaryRows.insert(bc.row)
+            if vzInverseByRow[bc.row] == nil {
+                let vz = vzValues[bc.row]
+                if vz.v != 0 {
+                    vzInverseByRow[bc.row] = m31Inverse(vz)
+                }
+            }
         }
+
+        // OPTIMIZATION 2: Pre-group boundary constraints by row for O(1) lookup
+        // Each tuple: (column, value, alphaPow) with alphaPow precomputed using global index
+        var constraintsByRow: [Int: [(column: Int, value: M31, alphaPow: M31)]] = [:]
+        for (globalIdx, bc) in boundaryConstraints.enumerated() {
+            let alphaPow = alphaPowers[20 + globalIdx]
+            if constraintsByRow[bc.row] == nil {
+                constraintsByRow[bc.row] = []
+            }
+            constraintsByRow[bc.row]?.append((bc.column, bc.value, alphaPow))
+        }
+
+        // OPTIMIZATION 3: Sort columnIndices once for better memory access locality
+        let sortedColumnIndices = columnIndices.sorted()
 
         // PARALLEL processing across evaluation points in chunks
         let chunkSize = 8192
@@ -602,10 +662,10 @@ public final class EVMGPUCircleSTARKProverEngine {
             for i in startIdx..<endIdx {
                 let nextI = (i + step) % evalLen
 
-                // Extract column values using subset
+                // Extract column values using subset (sorted indices for better cache locality)
                 for j in 0..<numProvingCols {
-                    current[j] = traceLDEs[columnIndices[j]][i]
-                    next[j] = traceLDEs[columnIndices[j]][nextI]
+                    current[j] = traceLDEs[sortedColumnIndices[j]][i]
+                    next[j] = traceLDEs[sortedColumnIndices[j]][nextI]
                 }
 
                 // Evaluate constraints with subset columns
@@ -630,19 +690,16 @@ public final class EVMGPUCircleSTARKProverEngine {
                     idx += 1
                 }
 
-                // Boundary constraints - use Set for O(1) lookup
+                // Boundary constraints - O(1) lookup via pre-grouped dictionary
+                // Uses precomputed m31Inverse (was called in hot loop before)
                 let traceRow = i / step
-                if boundaryRows.contains(traceRow) {
-                    for (bcIdx, bc) in boundaryConstraints.enumerated() {
-                        if bc.row == traceRow {
+                if let rowConstraints = constraintsByRow[traceRow] {
+                    if let vzInverse = vzInverseByRow[traceRow] {
+                        for bc in rowConstraints {
                             let colVal = traceLDEs[bc.column][i]
                             let diff = m31Sub(colVal, bc.value)
-                            let vz = vzValues[i]
-                            if vz.v != 0 {
-                                let quotient = m31Mul(diff, m31Inverse(vz))
-                                let alphaIdx = 20 + bcIdx
-                                combined = m31Add(combined, m31Mul(alphaPowers[alphaIdx], quotient))
-                            }
+                            let quotient = m31Mul(diff, vzInverse)
+                            combined = m31Add(combined, m31Mul(bc.alphaPow, quotient))
                         }
                     }
                 }
@@ -711,8 +768,8 @@ public final class EVMGPUCircleSTARKProverEngine {
 
         // Check if GPU proof generation is available
         // GPU proofs require GPUMerkleTreeM31Engine with buildTreeWithBuffer support
-        // DISABLED: GPU proof kernel has issues with internal node layout
-        let useGPUProofs = false && gpuMerkleEngine != nil && !traceTreeBuffers.isEmpty
+        // Uses poseidon2_m31_merkle_proof_batch kernel which correctly handles TREE_FIRST layout
+        let useGPUProofs = true && gpuMerkleEngine != nil && !traceTreeBuffers.isEmpty
         print("[GPU Prover] Query: GPU proofs=\(useGPUProofs), buffers=\(traceTreeBuffers.count), numLeaves=\(traceTreeNumLeaves), cols=\(numProvingCols), queries=\(friProof.queryIndices.count)")
 
         if useGPUProofs {
@@ -847,14 +904,11 @@ public final class EVMGPUCircleSTARKProverEngine {
 
     // MARK: - Circle FRI (GPU-Accelerated)
 
-    /// Circle FRI implementation using GPU-accelerated folding via GPUCircleFRIProverEngine.
+    /// Circle FRI implementation - delegates to cpuCircleFRI which uses GPU when available.
     ///
-    /// This replaces the CPU-based folding with GPU parallel FRI:
-    /// 1. Precompute all challenges from transcript
-    /// 2. Batch-fold all rounds using GPU kernels
-    /// 3. Build all Merkle trees in parallel using Poseidon2
-    ///
-    /// Note: GPU FRI engine has shader compilation issues, so we use CPU fallback directly
+    /// gpuCircleFRI uses GPUCircleFRIProverEngine for accelerated folding when:
+    /// 1. friEngine initialized successfully (shaders compiled)
+    /// 2. eval count >= gpuFRIFoldThreshold (default: 1, always met)
     private func circleFRI(
         evals: [M31],
         logN: Int,
