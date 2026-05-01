@@ -134,6 +134,26 @@ case "synthetic-block":
     // Run synthetic block benchmark (no RPC needed)
     RealEthereumBlockFetcher.benchmarkSyntheticBlock()
 
+case "multi-block-batch":
+    // Multi-block batch proving benchmark
+    let startBlock = args.count > 2 ? UInt64(args[2]) ?? 21000000 : 21000000
+    let blockCount = args.count > 3 ? Int(args[3]) ?? 3 : 3
+    let group = DispatchGroup()
+    group.enter()
+    Task {
+        do {
+            try await MultiBlockBatchBenchmark.run(
+                startBlock: startBlock,
+                blockCount: blockCount,
+                useCompression: true
+            )
+        } catch {
+            print("Multi-block benchmark failed: \(error)")
+        }
+        group.leave()
+    }
+    group.wait()
+
 case "phase-bench", "multi-stream":
     // Async benchmarks - run in Task block
     Task {

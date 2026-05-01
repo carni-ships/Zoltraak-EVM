@@ -263,11 +263,11 @@ public final class EVMCircleSTARKIVC: Sendable {
             config.logEvalLength * 50
         )
 
-        // Build CCS with identity matrices (simplified)
-        // Identity matrices should be m×n (constraints × vars), not square
-        let matrixA = SparseMatrix.identity(numVars)
-        let matrixB = SparseMatrix.identity(numVars)
-        let matrixC = SparseMatrix.identity(numVars)
+        // Build CCS with zero matrices of correct dimensions (m×n, not n×n)
+        // The verifier circuit uses placeholder matrices - they don't need to be identity
+        let matrixA = SparseMatrix.zeros(rows: numConstraints, cols: numVars)
+        let matrixB = SparseMatrix.zeros(rows: numConstraints, cols: numVars)
+        let matrixC = SparseMatrix.zeros(rows: numConstraints, cols: numVars)
 
         return CCSInstance(
             m: numConstraints,
