@@ -47,7 +47,7 @@ public struct EVMVerificationStats {
 }
 
 /// EVM-specific verifier using CircleSTARK
-public final class EVMVerifier: Sendable {
+public final class EVMVerifier {
 
     /// The underlying CircleSTARK verifier
     private let circleVerifier: CircleSTARKVerifier
@@ -130,96 +130,26 @@ public final class EVMVerifier: Sendable {
     }
 
     /// Verify a GPU Circle STARK proof.
-    /// Note: Full verification requires the prover's complete internal state to recompute
-    /// the Fiat-Shamir alpha value. This method verifies proof structure and Merkle paths.
+    /// Uses GPU prover engine for column subset and config-mismatch handling.
     public func verify(_ proof: GPUCircleSTARKProverProof) -> Bool {
-        // Create AIR from proof metadata
+        // Create GPU prover engine with config matching the proof's logBlowup
+        let proverConfig = GPUCircleSTARKProverConfig(
+            logBlowup: proof.logBlowup,
+            numQueries: proof.friProof.queryIndices.count > 0 ? proof.friProof.queryIndices.count : 4,
+            extensionDegree: 4,
+            gpuConstraintThreshold: 16,
+            gpuFRIFoldThreshold: 16,
+            usePoseidon2Merkle: true,
+            numQuotientSplits: 2
+        )
+        let engine = GPUCircleSTARKProverEngine(config: proverConfig)
+
+        // Create appropriate AIR based on trace length
         let logTraceLength = proof.traceLength > 0 ? Int(log2(Double(proof.traceLength))) : 0
         let air = EVMAIR(logTraceLength: logTraceLength)
 
-        let logTrace = air.logTraceLength
-        let logEval = logTrace + proof.logBlowup
-        let evalLen = 1 << logEval
-        let traceLen = air.traceLength
-        print("[EVMVerifier] DEBUG: logTrace=\(logTrace), logEval=\(logEval), evalLen=\(evalLen), traceLen=\(traceLen), proof.logBlowup=\(proof.logBlowup)")
-
-        // Check metadata matches
-        guard proof.traceLength == traceLen else {
-            print("[EVMVerifier] DEBUG: proof.traceLength=\(proof.traceLength) != traceLen=\(traceLen)")
-            return false
-        }
-
-        // tracePaths contains paths for the proving columns
-        guard let firstQR = proof.queryResponses.first else {
-            print("[EVMVerifier] DEBUG: no query responses")
-            return false
-        }
-        let numProvingColumns = firstQR.tracePaths.count
-        guard numProvingColumns > 0 else {
-            print("[EVMVerifier] DEBUG: numProvingColumns=0")
-            return false
-        }
-
-        // Verify trace values count matches numColumns
-        for qr in proof.queryResponses {
-            print("[EVMVerifier] DEBUG QR: queryIdx=\(qr.queryIndex), traceValues.count=\(qr.traceValues.count), tracePaths.count=\(qr.tracePaths.count), proof.numColumns=\(proof.numColumns)")
-            guard qr.queryIndex < evalLen else {
-                print("[EVMVerifier] DEBUG: qr.queryIndex=\(qr.queryIndex) >= evalLen=\(evalLen)")
-                return false
-            }
-            guard qr.traceValues.count == proof.numColumns else {
-                print("[EVMVerifier] DEBUG: qr.traceValues.count=\(qr.traceValues.count) != proof.numColumns=\(proof.numColumns)")
-                return false
-            }
-            guard qr.tracePaths.count == numProvingColumns else {
-                print("[EVMVerifier] DEBUG: qr.tracePaths.count=\(qr.tracePaths.count) != numProvingColumns=\(numProvingColumns)")
-                return false
-            }
-        }
-
-        // Verify trace Merkle paths for each proven column
-        for qr in proof.queryResponses {
-            for pathIdx in 0..<numProvingColumns {
-                let val = qr.traceValues[pathIdx]
-                let queryIdx = qr.queryIndex
-                let leafInput = [val, M31(v: UInt32(queryIdx)), M31.zero, M31.zero,
-                                 M31.zero, M31.zero, M31.zero, M31.zero]
-                let leafDigest = M31Digest(values: poseidon2M31HashSingle(leafInput))
-                let root = proof.traceCommitments[pathIdx]
-                // Manually compute leaf digest and trace up the path
-                var currentDigest = leafDigest
-                var idx = qr.queryIndex
-                print("[EVMVerifier] DEBUG verify: pathIdx=\(pathIdx), queryIdx=\(idx), val=\(val.v), numLevels=\(qr.tracePaths[pathIdx].count)")
-                print("[EVMVerifier] DEBUG: root[0]=\(root.values[0].v), leafDigest[0]=\(leafDigest.values[0].v)")
-                for (levelIdx, sibling) in qr.tracePaths[pathIdx].enumerated() {
-                    let expectedIdx = idx ^ 1
-                    print("[EVMVerifier] DEBUG level \(levelIdx): idx=\(idx), sibling[0]=\(sibling.values[0].v), expectedIdx=\(expectedIdx), sibling_is_zero=\(sibling.values[0].v == 0)")
-                    if idx & 1 == 0 {
-                        currentDigest = M31Digest(values: poseidon2M31Hash(left: currentDigest.values, right: sibling.values))
-                    } else {
-                        currentDigest = M31Digest(values: poseidon2M31Hash(left: sibling.values, right: currentDigest.values))
-                    }
-                    idx /= 2
-                    print("[EVMVerifier] DEBUG level \(levelIdx): after hash, current[0]=\(currentDigest.values[0].v)")
-                }
-                print("[EVMVerifier] DEBUG verify: final current[0]=\(currentDigest.values[0].v), root[0]=\(root.values[0].v), match=\(currentDigest == root)")
-                if currentDigest != root {
-                    print("[EVMVerifier] DEBUG: Merkle verification FAILED for pathIdx=\(pathIdx)")
-                    return false
-                }
-            }
-
-            // Verify composition Merkle path
-            let compLeafInput = [qr.compositionValue, M31(v: UInt32(qr.queryIndex)),
-                                 M31.zero, M31.zero, M31.zero, M31.zero, M31.zero, M31.zero]
-            let compLeafDigest = M31Digest(values: poseidon2M31HashSingle(compLeafInput))
-            if !verifyPoseidon2M31MerkleProof(
-                leafDigest: compLeafDigest, path: qr.compositionPath,
-                index: qr.queryIndex, root: proof.compositionCommitment
-            ) { return false }
-        }
-
-        return true
+        // Use GPU prover engine's verify
+        return engine.verify(air: air, proof: proof)
     }
 
     /// Verify a batch proof
