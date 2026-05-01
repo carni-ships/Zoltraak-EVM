@@ -1668,7 +1668,11 @@ import zkMetal
 
         let enc = cmdBuf.makeComputeCommandEncoder()!
 
-        enc.setComputePipelineState(batchProofGenFunction)
+        // CRITICAL FIX: Use tree-first kernel since buildTreesBatchGPU creates tree-first layout.
+        // The batchProofGenFunction (poseidon2_m31_merkle_proof_batch) expects flat layout
+        // but buildTreesBatchGPU produces tree-first layout (leaves compact by tree).
+        let proofKernel = treeFirstProofGenFunction ?? batchProofGenFunction
+        enc.setComputePipelineState(proofKernel)
         enc.setBuffer(treeBuffer, offset: 0, index: 0)
         enc.setBuffer(proofBuf, offset: 0, index: 1)
         var numTreesVal = UInt32(numTrees)
