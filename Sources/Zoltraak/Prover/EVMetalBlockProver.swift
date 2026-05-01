@@ -33,6 +33,21 @@ public struct BlockProvingConfig {
     /// Archive node URL for witness fetching (e.g., "http://localhost:8080")
     public let archiveNodeURL: String?
 
+    /// Use state proofs for verified state access (eth_getProof)
+    public let useStateProofs: Bool
+
+    /// State proof verification mode
+    public enum StateProofMode: Sendable {
+        /// Pre-flight verification before proving (default)
+        case preflight
+        /// Require proofs for all state access
+        case strict
+        /// Legacy mode without state proofs (current behavior)
+        case withoutProofs
+    }
+
+    public let stateProofMode: StateProofMode
+
     public init(
         numQueries: Int = 8,
         logBlowup: Int = 2,
@@ -42,7 +57,9 @@ public struct BlockProvingConfig {
         enableInterTxConstraints: Bool = true,
         gpuBatchSize: Int = 512,
         useArchiveNodeWitness: Bool = false,
-        archiveNodeURL: String? = nil
+        archiveNodeURL: String? = nil,
+        useStateProofs: Bool = false,
+        stateProofMode: StateProofMode = .preflight
     ) {
         self.numQueries = numQueries
         self.logBlowup = logBlowup
@@ -53,6 +70,8 @@ public struct BlockProvingConfig {
         self.gpuBatchSize = gpuBatchSize
         self.useArchiveNodeWitness = useArchiveNodeWitness
         self.archiveNodeURL = archiveNodeURL
+        self.useStateProofs = useStateProofs
+        self.stateProofMode = stateProofMode
     }
 
     /// Default configuration for production

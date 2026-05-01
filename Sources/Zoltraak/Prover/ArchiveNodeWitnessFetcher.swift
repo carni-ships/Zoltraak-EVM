@@ -647,7 +647,38 @@ public enum ArchiveNodeError: Error, LocalizedError {
     }
 }
 
-// MARK: - String Extension
+// MARK: - State Proof Integration
+
+/// Extension for integrating state proof fetching with witness fetcher.
+extension ArchiveNodeWitnessFetcher {
+
+    /// Fetch and verify state proofs for an account.
+    ///
+    /// This method fetches Merkle Patricia Trie proofs via `eth_getProof` RPC,
+    /// enabling verified state access for Zoltraak's EVM proof system.
+    ///
+    /// - Parameters:
+    ///   - address: Ethereum address to fetch state for
+    ///   - storageSlots: Storage slots to fetch proofs for (optional)
+    ///   - blockNumber: Block number
+    /// - Returns: Verified state from proofs
+    /// - Throws: StateProofFetcherError if fetch or verification fails
+    public func fetchStateProofs(
+        address: M31Word,
+        storageSlots: [M31Word] = [],
+        blockNumber: UInt64
+    ) async throws -> StateProofFetcher.VerifiedState {
+        let fetcher = StateProofFetcher()
+        let proof = try await fetcher.fetchProofs(
+            address: address,
+            storageSlots: storageSlots,
+            blockNumber: blockNumber
+        )
+
+        let verifier = StateProofVerifier()
+        return try verifier.verifyFullProof(proof)
+    }
+}
 
 private extension String {
     func strippingPrefix(_ prefix: String) -> String {
