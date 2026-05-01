@@ -267,11 +267,91 @@ public final class ZoltraakIVCBlockProver: Sendable {
             // CPU proof format - use standard deserialization
             return try deserializeCircleSTARKProof(from: data)
         } else {
-            // GPU proof format - GPU proofs require internal zkMetal types for full IVC
-            // For now, throw an error since GPU proving uses a different proof format
-            // that requires zkMetal SDK changes to support properly
-            throw IVCProverError.proofParsingFailed
+            // GPU proof format - deserialize GPU format and convert
+            let gpuProof = try deserializeGPUProof(from: data)
+            return convertGPUProofToCircleSTARKProof(gpuProof)
         }
+    }
+
+    /// Convert GPUCircleSTARKProverProof to CircleSTARKProof for IVC verification.
+    ///
+    /// The IVC verifier circuit builder expects a CircleSTARKProof with specific
+    /// structure. This adapter transforms the GPU proof format to the expected format.
+    private func convertGPUProofToCircleSTARKProof(_ gpuProof: GPUCircleSTARKProverProof) -> CircleSTARKProof {
+        // Convert M31Digest trace commitments to [[UInt8]] format
+        let traceCommitments: [[UInt8]] = gpuProof.traceCommitments.map { digest in
+            digest.values.flatMap { m31 -> [UInt8] in
+                var val = m31.v
+                return withUnsafeBytes(of: &val) { Array($0) }
+            }
+        }
+
+        // Convert composition commitment
+        let compositionCommitment: [UInt8] = gpuProof.compositionCommitment.values.flatMap { m31 -> [UInt8] in
+            var val = m31.v
+            return withUnsafeBytes(of: &val) { Array($0) }
+        }
+
+        // Convert FRI proof - build CircleFRIProofData from GPU format
+        let friRounds: [CircleFRIRound] = gpuProof.friProof.rounds.map { round in
+            let commitment: [UInt8] = round.commitment.values.flatMap { m31 -> [UInt8] in
+                var val = m31.v
+                return withUnsafeBytes(of: &val) { Array($0) }
+            }
+            let queryResponses: [(M31, M31, [[UInt8]])] = round.queryResponses.map { (a, b, path) in
+                let pathBytes: [[UInt8]] = path.map { digest in
+                    digest.values.flatMap { m31 -> [UInt8] in
+                        var val = m31.v
+                        return withUnsafeBytes(of: &val) { Array($0) }
+                    }
+                }
+                return (a, b, pathBytes)
+            }
+            return CircleFRIRound(commitment: commitment, queryResponses: queryResponses, foldAlpha: gpuProof.alpha)
+        }
+
+        let friProof = CircleFRIProofData(
+            rounds: friRounds,
+            finalValue: gpuProof.friProof.finalValue,
+            queryIndices: gpuProof.friProof.queryIndices
+        )
+
+        // Convert query responses
+        let queryResponses: [CircleSTARKQueryResponse] = gpuProof.queryResponses.map { qr in
+            let traceValues = qr.traceValues
+            let tracePaths: [[[UInt8]]] = qr.tracePaths.map { path in
+                path.map { digest in
+                    digest.values.flatMap { m31 -> [UInt8] in
+                        var val = m31.v
+                        return withUnsafeBytes(of: &val) { Array($0) }
+                    }
+                }
+            }
+            let compositionPath: [[UInt8]] = qr.compositionPath.map { digest in
+                digest.values.flatMap { m31 -> [UInt8] in
+                    var val = m31.v
+                    return withUnsafeBytes(of: &val) { Array($0) }
+                }
+            }
+            return CircleSTARKQueryResponse(
+                traceValues: traceValues,
+                tracePaths: tracePaths,
+                compositionValue: qr.compositionValue,
+                compositionPath: compositionPath,
+                queryIndex: qr.queryIndex
+            )
+        }
+
+        return CircleSTARKProof(
+            traceCommitments: traceCommitments,
+            compositionCommitment: compositionCommitment,
+            friProof: friProof,
+            queryResponses: queryResponses,
+            alpha: gpuProof.alpha,
+            traceLength: gpuProof.traceLength,
+            numColumns: gpuProof.numColumns,
+            logBlowup: gpuProof.logBlowup
+        )
     }
 
     private func computeTraceRoot(from commitments: [M31Digest]) -> Fr {
