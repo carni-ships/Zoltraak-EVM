@@ -591,10 +591,20 @@ public final class EVMExecutionEngine: Sendable {
         case .CREATE2:  try create_op(&state, create2: true)
         case .SELFDESTRUCT: try selfdestruct_op(&state)
 
-        // EOF (not yet fully supported)
-        case .RJUMP, .RJUMPI, .CALLF, .RETF, .JUMPF, .DUPN, .SWAPN,
-             .SLOADBYTES, .SSTOREBYTES, .MSTORESIZE, .TRACKSTORAGE, .COPYLOG:
-            throw EVMExecutionError.invalidOpcode(opcode: opcode)
+        // EOF (Ethereum Object Format) opcodes - EIP-3540, 3670, 4200, 5450
+        case .RJUMP:    try rjump_op(&state)
+        case .RJUMPI:   try rjumpi_op(&state)
+        case .RJUMPV:   try rjumpv_op(&state)
+        case .JUMPF:    try jumpf_op(&state)
+        case .CALLF:    try callf_op(&state)
+        case .RETF:     try retf_op(&state)
+        case .DUPN:     try dupn_op(&state)
+        case .SWAPN:    try swapn_op(&state)
+        case .SLOADBYTES: try sloadbytes_op(&state)
+        case .SSTOREBYTES: try sstorebytes_op(&state)
+        case .MSTORESIZE: try mstoresize_op(&state)
+        case .TRACKSTORAGE: try trackstorage_op(&state)
+        case .COPYLOG:  try copylog_op(&state)
 
         // Unimplemented
         default:
@@ -1865,6 +1875,453 @@ public final class EVMExecutionEngine: Sendable {
 
         // Update state root (simplified - in real implementation would compute Merkle root)
         // state.stateRoot = computeNewStateRoot(stateRoot, key, value)
+    }
+
+    // MARK: - EOF Opcodes (EIP-3540, 3670, 4200, 5450)
+
+    /// RJUMP - Relative unconditional jump
+    /// Stack: consumes nothing, offset is immediate (16-bit signed)
+    /// Validates destination is within code bounds and lands on valid instruction
+    private func rjump_op(_ state: inout EVMState) throws {
+        if !state.chargeGas(2) { throw EVMExecutionError.outOfGas }
+
+        let pc = state.pc
+        let code = state.currentFrame.code
+
+        // Read 16-bit signed immediate from code
+        guard pc + 2 <= code.count else {
+            throw EVMExecutionError.invalidCode(reason: "RJUMP: insufficient bytes for immediate")
+        }
+
+        let byte0 = UInt16(code[pc])
+        let byte1 = UInt16(code[pc + 1])
+        let offset = Int16(bitPattern: byte0 | (byte1 << 8))
+
+        // Calculate target: current PC + 2 (past immediate) + offset
+        let target = (pc + 2) &+ Int(offset)
+
+        // Validate target is within code bounds
+        guard target >= 0 && target < code.count else {
+            throw EVMExecutionError.invalidJump(dest: target)
+        }
+
+        // Validate target lands on valid instruction (not in middle of multi-byte instruction)
+        let targetOpcode = code[target]
+        guard !EOFValidator.isImmediateOpcode(targetOpcode) else {
+            throw EVMExecutionError.invalidJump(dest: target)
+        }
+
+        state.pc = target
+    }
+
+    /// RJUMPI - Relative conditional jump
+    /// Stack: cond ->
+    /// Validates destination is within code bounds and lands on valid instruction
+    private func rjumpi_op(_ state: inout EVMState) throws {
+        if !state.chargeGas(2) { throw EVMExecutionError.outOfGas }
+
+        guard state.stack.stackHeight >= 1 else { throw EVMExecutionError.stackUnderflow }
+        let cond = state.stack.pop()
+
+        let pc = state.pc
+        let code = state.currentFrame.code
+
+        // Read 16-bit signed immediate
+        guard pc + 2 <= code.count else {
+            throw EVMExecutionError.invalidCode(reason: "RJUMPI: insufficient bytes for immediate")
+        }
+
+        let byte0 = UInt16(code[pc])
+        let byte1 = UInt16(code[pc + 1])
+        let offset = Int16(bitPattern: byte0 | (byte1 << 8))
+
+        // Advance PC past immediate
+        state.pc = pc + 2
+
+        if !cond.isZero {
+            if !state.chargeGas(4) { throw EVMExecutionError.outOfGas }
+
+            // Calculate target
+            let target = state.pc &+ Int(offset)
+
+            // Validate target is within code bounds
+            guard target >= 0 && target < code.count else {
+                throw EVMExecutionError.invalidJump(dest: target)
+            }
+
+            // Validate target lands on valid instruction
+            let targetOpcode = code[target]
+            guard !EOFValidator.isImmediateOpcode(targetOpcode) else {
+                throw EVMExecutionError.invalidJump(dest: target)
+            }
+
+            state.pc = target
+        }
+    }
+
+    /// RJUMPV - Relative jump with table
+    /// Stack: index ->
+    /// Table contains relative offsets from end of table
+    private func rjumpv_op(_ state: inout EVMState) throws {
+        if !state.chargeGas(2) { throw EVMExecutionError.outOfGas }
+
+        guard state.stack.stackHeight >= 1 else { throw EVMExecutionError.stackUnderflow }
+        let indexWord = state.stack.pop()
+        let index = Int(indexWord.low64)
+
+        let pc = state.pc
+        let code = state.currentFrame.code
+
+        // Read table size
+        guard pc < code.count else {
+            throw EVMExecutionError.invalidCode(reason: "RJUMPV: no table size")
+        }
+        let tableSize = Int(code[pc])
+        let tableStart = pc + 1
+
+        // Total size of table: 1 (size) + (tableSize + 1) * 2 (entries)
+        guard tableStart + (tableSize + 1) * 2 <= code.count else {
+            throw EVMExecutionError.invalidCode(reason: "RJUMPV: insufficient table entries")
+        }
+
+        if index <= tableSize {
+            // Read target offset from table
+            let entryOffset = tableStart + index * 2
+            let byte0 = UInt16(code[entryOffset])
+            let byte1 = UInt16(code[entryOffset + 1])
+            let offset = Int16(bitPattern: byte0 | (byte1 << 8))
+
+            // Target is calculated from end of table (after all entries)
+            let tableEnd = tableStart + (tableSize + 1) * 2
+            let target = tableEnd &+ Int(offset)
+
+            // Validate target
+            guard target >= 0 && target < code.count else {
+                throw EVMExecutionError.invalidJump(dest: target)
+            }
+
+            let targetOpcode = code[target]
+            guard !EOFValidator.isImmediateOpcode(targetOpcode) else {
+                throw EVMExecutionError.invalidJump(dest: target)
+            }
+
+            state.pc = target
+        } else {
+            // Invalid index - jump to abort (default destination after table)
+            state.pc = tableStart + (tableSize + 1) * 2
+        }
+    }
+
+    /// JUMPF - Unconditional jump to function
+    /// Stack: funcIdx ->
+    /// Jumps to the entry point of the specified code section
+    private func jumpf_op(_ state: inout EVMState) throws {
+        if !state.chargeGas(2) { throw EVMExecutionError.outOfGas }
+
+        guard state.stack.stackHeight >= 1 else { throw EVMExecutionError.stackUnderflow }
+        let funcIdxWord = state.stack.pop()
+        let funcIdx = Int(funcIdxWord.low64)
+
+        // Look up function code from EOF container
+        guard let container = state.eofContainer else {
+            throw EVMExecutionError.invalidCode(reason: "JUMPF: no EOF container")
+        }
+
+        guard funcIdx >= 0 && funcIdx < container.codeSections.count else {
+            throw EOFValidationError.invalidFunctionIndex(index: funcIdx, maxIndex: container.codeSections.count)
+        }
+
+        // Get the code section entrypoint
+        let codeSection = container.codeSections[funcIdx]
+
+        // Switch to the new code section
+        state.currentFrame.code = container.codeSectionData[funcIdx]
+        state.currentFrame.codeSectionIndex = funcIdx
+        state.pc = codeSection.entrypoint
+
+        // Clear return stack for new code section
+        state.currentFrame.returnStack = []
+    }
+
+    /// CALLF - Call function
+    /// Stack: argsOffset argsSize retOffset retSize ->
+    /// Gas: 2 + memory expansion
+    private func callf_op(_ state: inout EVMState) throws {
+        if !state.chargeGas(2) { throw EVMExecutionError.outOfGas }
+
+        guard state.stack.stackHeight >= 4 else { throw EVMExecutionError.stackUnderflow }
+
+        let retSize = state.stack.pop()
+        let retOffset = state.stack.pop()
+        let argsSize = state.stack.pop()
+        let argsOffset = state.stack.pop()
+
+        let pc = state.pc
+        let code = state.currentFrame.code
+
+        // Read 16-bit function index
+        guard pc + 2 <= code.count else {
+            throw EVMExecutionError.invalidCode(reason: "CALLF: insufficient bytes for func index")
+        }
+
+        let byte0 = UInt16(code[pc])
+        let byte1 = UInt16(code[pc + 1])
+        let funcIdx = Int(byte0 | (byte1 << 8))
+
+        // Look up function from EOF container
+        guard let container = state.eofContainer else {
+            throw EVMExecutionError.invalidCode(reason: "CALLF: no EOF container")
+        }
+
+        guard funcIdx >= 0 && funcIdx < container.codeSections.count else {
+            throw EOFValidationError.invalidFunctionIndex(index: funcIdx, maxIndex: container.codeSections.count)
+        }
+
+        // Get type entry to validate stack arguments
+        guard let typeEntry = container.typeEntry(for: funcIdx) else {
+            throw EVMExecutionError.invalidCode(reason: "CALLF: no type entry for function")
+        }
+
+        // Memory expansion gas for args and return data
+        let argsOffsetInt = Int(argsOffset.low64)
+        let argsSizeInt = Int(argsSize.low64)
+        let retOffsetInt = Int(retOffset.low64)
+        let retSizeInt = Int(retSize.low64)
+
+        // Expand memory for args and return
+        if argsSizeInt > 0 {
+            let memoryCost = UInt64((argsOffsetInt + argsSizeInt + 31) / 32)
+            if !state.chargeGas(memoryCost) { throw EVMExecutionError.outOfGas }
+            state.memory.expand(offset: argsOffsetInt, size: argsSizeInt)
+        }
+        if retSizeInt > 0 {
+            let memoryCost = UInt64((retOffsetInt + retSizeInt + 31) / 32)
+            if !state.chargeGas(memoryCost) { throw EVMExecutionError.outOfGas }
+            state.memory.expand(offset: retOffsetInt, size: retSizeInt)
+        }
+
+        // Save current return PC (after CALLF instruction)
+        let returnPc = pc + 2
+        state.currentFrame.returnStack.append(returnPc)
+
+        // Push return address onto stack (for RETF to pop)
+        let returnAddress = M31Word(low64: UInt64(returnPc))
+        state.stack.push(returnAddress)
+
+        // Get the code section to execute
+        let codeSection = container.codeSections[funcIdx]
+        let funcCode = container.codeSectionData[funcIdx]
+
+        // Save current frame state and push new frame
+        // In EOF, CALLF creates a new frame with the function's code
+        var newFrame = CallFrame(
+            code: funcCode,
+            calldata: state.currentFrame.calldata,
+            isEOF: true,
+            codeSectionIndex: funcIdx
+        )
+        newFrame.address = state.currentFrame.address
+        newFrame.caller = state.currentFrame.address
+        newFrame.callValue = .zero  // EOF calls don't transfer value
+        newFrame.staticFlag = state.currentFrame.staticFlag
+        newFrame.returnStack = []
+
+        // Copy return location to new frame for later use
+        newFrame.returnData = []  // Will be set on RETF
+
+        state.pushFrame(newFrame)
+        state.pc = codeSection.entrypoint
+    }
+
+    /// RETF - Return from function
+    /// Stack: (empty - return address was pushed by CALLF)
+    private func retf_op(_ state: inout EVMState) throws {
+        if !state.chargeGas(2) { throw EVMExecutionError.outOfGas }
+
+        // Return address was pushed by CALLF
+        guard state.stack.stackHeight >= 1 else { throw EVMExecutionError.stackUnderflow }
+        let returnPc = state.stack.pop()
+        let returnPcInt = Int(returnPc.low64)
+
+        // Pop the return stack to get back to previous frame
+        guard !state.currentFrame.returnStack.isEmpty else {
+            throw EVMExecutionError.invalidCode(reason: "RETF: empty return stack")
+        }
+
+        // Pop back to caller frame
+        state.popFrame()
+
+        // Restore PC to return address
+        state.pc = returnPcInt
+    }
+
+    /// DUPN - Duplicate Nth stack item
+    /// Stack: ... -> ... value
+    private func dupn_op(_ state: inout EVMState) throws {
+        if !state.chargeGas(3) { throw EVMExecutionError.outOfGas }
+
+        let pc = state.pc
+        let code = state.currentFrame.code
+
+        // Read immediate stack height
+        guard pc < code.count else {
+            throw EVMExecutionError.invalidCode(reason: "DUPN: missing immediate")
+        }
+        let n = Int(code[pc])
+        state.pc = pc + 1
+
+        // Check stack has at least n+1 items (n from top, plus 1 more to dup)
+        guard state.stack.stackHeight > n else { throw EVMExecutionError.stackUnderflow }
+
+        // Peek at stack[sp - 1 - n]
+        let value = state.stack.peek(depth: state.stack.stackHeight - n)
+        state.stack.push(value)
+    }
+
+    /// SWAPN - Swap with Nth stack item
+    /// Stack: ... value -> value ...
+    /// Swaps top of stack with stack[sp - n]
+    private func swapn_op(_ state: inout EVMState) throws {
+        if !state.chargeGas(3) { throw EVMExecutionError.outOfGas }
+
+        let pc = state.pc
+        let code = state.currentFrame.code
+
+        // Read immediate n
+        guard pc < code.count else {
+            throw EVMExecutionError.invalidCode(reason: "SWAPN: missing immediate")
+        }
+        let n = Int(code[pc])
+        state.pc = pc + 1
+
+        // Check stack has at least n+2 items (n below top, plus top and one more)
+        guard state.stack.stackHeight > n + 1 else { throw EVMExecutionError.stackUnderflow }
+
+        // Swap stack[sp-1] with stack[sp-1-n]
+        // stackHeight - 1 = top (sp-1)
+        // stackHeight - 1 - n = target (sp-1-n)
+        try state.stack.swap(position: n + 1)
+    }
+
+    /// SLOADBYTES - Bytes-based SLOAD (EOFv1)
+    /// Stack: offset size key ->
+    /// Loads a range of bytes from storage (using word-based storage internally)
+    private func sloadbytes_op(_ state: inout EVMState) throws {
+        if !state.chargeGas(100) { throw EVMExecutionError.outOfGas }
+
+        guard state.stack.stackHeight >= 3 else { throw EVMExecutionError.stackUnderflow }
+
+        let key = state.stack.pop()
+        let size = state.stack.pop()
+        let offset = state.stack.pop()
+
+        let sizeInt = min(Int(size.low64), 32)  // Cap at 32 bytes
+        let offsetInt = Int(offset.low64)
+        let keyInt = Int(key.low64)
+
+        // Expand memory
+        state.memory.expand(offset: offsetInt, size: sizeInt)
+
+        // Read from storage word-by-word
+        // Storage is word-addressable, so we compute word index from key
+        for i in 0..<(sizeInt + 31) / 32 {
+            let wordKey = M31Word(low64: UInt64(keyInt + i * 32))
+            let value = state.storage.load(key: wordKey)
+            // Store each byte of the word to memory
+            let bytes = value.toBytes()
+            for j in 0..<min(32, sizeInt - i * 32) {
+                state.memory.storeByte(offset: offsetInt + i * 32 + j, value: bytes[j])
+            }
+        }
+    }
+
+    /// SSTOREBYTES - Bytes-based SSTORE (EOFv1)
+    /// Stack: offset size key ->
+    /// Stores a range of bytes to storage (using word-based storage internally)
+    private func sstorebytes_op(_ state: inout EVMState) throws {
+        if !state.chargeGas(2900) { throw EVMExecutionError.outOfGas }  // EIP-1283 gas
+
+        guard state.stack.stackHeight >= 3 else { throw EVMExecutionError.stackUnderflow }
+
+        let key = state.stack.pop()
+        let size = state.stack.pop()
+        let offset = state.stack.pop()
+
+        let sizeInt = min(Int(size.low64), 32)  // Cap at 32 bytes
+        let offsetInt = Int(offset.low64)
+        let keyInt = Int(key.low64)
+
+        // Write to storage word-by-word
+        for i in 0..<(sizeInt + 31) / 32 {
+            let wordKey = M31Word(low64: UInt64(keyInt + i * 32))
+            // Load current word from storage to preserve other bytes
+            var value = state.storage.load(key: wordKey)
+            var bytes = value.toBytes()
+            // Update bytes that are being stored
+            for j in 0..<min(32, sizeInt - i * 32) {
+                bytes[j] = state.memory.loadByte(offset: offsetInt + i * 32 + j)
+            }
+            value = M31Word(bytes: bytes)
+            state.storage.store(key: wordKey, value: value)
+        }
+    }
+
+    /// MSTORESIZE - Resize memory to specified size
+    /// Stack: size ->
+    private func mstoresize_op(_ state: inout EVMState) throws {
+        if !state.chargeGas(3) { throw EVMExecutionError.outOfGas }
+
+        guard state.stack.stackHeight >= 1 else { throw EVMExecutionError.stackUnderflow }
+
+        let sizeWord = state.stack.pop()
+        let sizeInt = Int(sizeWord.low64)
+
+        // Expand memory to the new size
+        state.memory.expand(offset: 0, size: sizeInt)
+    }
+
+    /// TRACKSTORAGE - Track storage slot for dirty tracking
+    /// Stack: key ->
+    private func trackstorage_op(_ state: inout EVMState) throws {
+        if !state.chargeGas(100) { throw EVMExecutionError.outOfGas }
+
+        guard state.stack.stackHeight >= 1 else { throw EVMExecutionError.stackUnderflow }
+
+        let key = state.stack.pop()
+
+        // Track storage key for access list
+        let keyHex = key.toHexString()
+        let address = state.currentFrame.address.toHexString()
+        let storageKey = "\(address):\(keyHex)"
+        state.accessedStorageKeys.insert(storageKey)
+    }
+
+    /// COPYLOG - Copy log data
+    /// Stack: offset size topicIndex ->
+    /// Copies data to log (used with LOG opcodes conceptually)
+    private func copylog_op(_ state: inout EVMState) throws {
+        if !state.chargeGas(3) { throw EVMExecutionError.outOfGas }
+
+        guard state.stack.stackHeight >= 3 else { throw EVMExecutionError.stackUnderflow }
+
+        let topicIndex = state.stack.pop()
+        let size = state.stack.pop()
+        let offset = state.stack.pop()
+
+        let topicIdxInt = Int(topicIndex.low64)
+        let sizeInt = min(Int(size.low64), 32)
+        let offsetInt = Int(offset.low64)
+
+        // Expand memory
+        state.memory.expand(offset: offsetInt, size: sizeInt)
+
+        // For EOF, this copies data - conceptually similar to RETURNDATACOPY
+        // In practice, EOF logs work differently than legacy
+        // This is a placeholder that copies zero bytes to the specified location
+        for i in 0..<sizeInt {
+            // In EOF1, this would copy from calldata or code based on topicIndex
+            state.memory.storeByte(offset: offsetInt + i, value: 0)
+        }
     }
 }
 

@@ -359,9 +359,32 @@ extension EVMOpcode {
         case .SELFDESTRUCT:  return OpcodeProperties(name: "SELFDESTRUCT", gas: 5000, stackHeightChange: -1, category: .system)
         case .PUSH0:         return OpcodeProperties(name: "PUSH0", gas: 2, stackHeightChange: 1, category: .push)
 
-        case .RJUMP, .RJUMPI, .RJUMPV, .CALLF, .RETF, .JUMPF, .DUPN, .SWAPN,
-             .SLOADBYTES, .SSTOREBYTES, .MSTORESIZE, .TRACKSTORAGE, .COPYLOG:
-            return OpcodeProperties(name: "\(self)", gas: 0, stackHeightChange: 0, category: .eof)
+        case .RJUMP:
+            return OpcodeProperties(name: "RJUMP", gas: 2, stackHeightChange: 0, category: .eof, isControlFlow: true)
+        case .RJUMPI:
+            return OpcodeProperties(name: "RJUMPI", gas: 4, stackHeightChange: -1, category: .eof, isControlFlow: true)
+        case .RJUMPV:
+            return OpcodeProperties(name: "RJUMPV", gas: 3, stackHeightChange: -1, category: .eof, isControlFlow: true)
+        case .CALLF:
+            return OpcodeProperties(name: "CALLF", gas: 2, stackHeightChange: 2, category: .eof, isControlFlow: true)
+        case .RETF:
+            return OpcodeProperties(name: "RETF", gas: 2, stackHeightChange: -2, category: .eof, isControlFlow: true)
+        case .JUMPF:
+            return OpcodeProperties(name: "JUMPF", gas: 2, stackHeightChange: -1, category: .eof, isControlFlow: true)
+        case .DUPN:
+            return OpcodeProperties(name: "DUPN", gas: 3, stackHeightChange: 1, category: .eof)
+        case .SWAPN:
+            return OpcodeProperties(name: "SWAPN", gas: 3, stackHeightChange: 0, category: .eof)
+        case .SLOADBYTES:
+            return OpcodeProperties(name: "SLOADBYTES", gas: 100, stackHeightChange: -3, category: .eof, isStorageOp: true)
+        case .SSTOREBYTES:
+            return OpcodeProperties(name: "SSTOREBYTES", gas: 2900, stackHeightChange: -3, category: .eof, isStorageOp: true)
+        case .MSTORESIZE:
+            return OpcodeProperties(name: "MSTORESIZE", gas: 3, stackHeightChange: -1, category: .eof, isMemoryOp: true)
+        case .TRACKSTORAGE:
+            return OpcodeProperties(name: "TRACKSTORAGE", gas: 100, stackHeightChange: -1, category: .eof, isStorageOp: true)
+        case .COPYLOG:
+            return OpcodeProperties(name: "COPYLOG", gas: 3, stackHeightChange: -3, category: .eof)
         }
     }
 

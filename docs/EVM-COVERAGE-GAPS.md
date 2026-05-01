@@ -15,27 +15,39 @@ Zoltraak is a GPU-accelerated ZK-EVM proving system using Circle STARK over the 
 
 Zoltraak generates proofs in the **Mersenne31 field** (prime: 2^31 - 1), but Ethereum Mainnet verifies proofs on **BN254** (alt_bn128 curve). STARK proofs over M31 cannot be directly verified in EVM bytecode using BN254 pairings.
 
-### Impact
+### Current Implementation
 
-- Proofs cannot be submitted to Ethereum L1 or L2 bridges
-- Rollup Sequencer cannot post proofs to canonical bridge
-- Requires custom verification infrastructure
+**Architecture exists** in `Sources/Zoltraak/Aggregation/`:
+- `EVMBN254Verifier.swift` - Transparent BN254 verifier (Pedersen + CCS)
+- `EVMCircleSTARKIVC.swift` - Nova IVC for Circle STARK folding
+- `EVMHyperNovaAggregator.swift` - HyperNova aggregation
+- `EVMCycleFoldFinalizer.swift` - CycleFold optimization (BN254/Grumpkin)
+- `EVMSTARKVerifier.sol` - On-chain BN254 verifier with pairing
 
-### Solution Options
+**Flow:**
+```
+M31 Circle STARK (~30KB) → IVC folding → HyperNova → CycleFold → ~200 bytes
+                                                              ↓
+                                               EVMSTARKVerifier.sol (pairing)
+```
 
-| Approach | Pros | Cons | Complexity |
-|----------|------|------|------------|
-| **A. Recursive Aggregation** | Chain to BN254, enables on-chain verification | Requires additional proving | High |
-| **B. Custom Verifier Contract** | Direct M31 field ops in EVM | Gas-intensive, no native field support | Medium |
-| **C. Verifiable Delay Function Bridge** | Decouple verification from Ethereum | Trust assumption | Low |
-| **D. ZK Bridge to BN254** | Full interoperability | Complex conversion | Very High |
+### Status
 
-**Recommended**: Option A - Use recursive STARK aggregation to produce a BN254-proof of the M31 proof. This is how Taiko achieves Type 1 compatibility with Ethereum.
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Circle STARK IVC | ⚠️ Partial | Stubbed field arithmetic |
+| HyperNova Aggregator | ⚠️ Partial | CCS builder exists |
+| CycleFold Finalizer | ⚠️ Partial | Recursive stubs |
+| FieldArithmetic | ❌ Stubbed | frAdd/frMul recursive |
+| EVMBN254Verifier | ⚠️ Partial | Pedersen commitments only |
+| On-chain verifier | ✅ Implemented | Solidity + ecPairing |
 
-**Implementation path**:
-1. Prove M31 STARK proof is valid (GPU fast)
-2. Convert proof to BN254 representation (CPU slower)
-3. Submit BN254 proof to Ethereum bridge
+### Known Issues
+
+1. `FieldArithmetic.swift` functions are stubs (frAdd calls itself)
+2. M31 to BN254 Fr conversion needs verification
+3. Actual EC point arithmetic not fully implemented
+4. IVC verify() depends on unimplemented HyperNovaProver.engine.decide()
 
 ---
 
@@ -203,10 +215,11 @@ public protocol EvmStateProvider: Sendable {
 | ecMul | ✅ GPU | GPUEVMPrecompileEngine |
 | ecPairing | ✅ GPU | GPUEVMPrecompileEngine |
 | blake2f | ✅ GPU | GPUEVMPrecompileEngine |
-| **BLS12-381** | ⚠️ Partial | G1/G2 ops, missing map |
-| blsMapG1 | ❌ Missing | Needs implementation |
-| blsMapG2 | ❌ Missing | Needs implementation |
-| blsPairing | ⚠️ Partial | Incomplete |
+| bls2f | ✅ CPU | Foundation fallback |
+| **BLS12-381** | ✅ Partial | G1/G2 ops wired, map stubs |
+| blsMapG1 | ⚠️ Stub | Wired up, SWU isogeny TODO |
+| blsMapG2 | ⚠️ Stub | Wired up, extended SWU TODO |
+| blsPairing | ✅ CPU | Implemented |
 
 ### Missing Precompiles
 
@@ -257,22 +270,24 @@ EVMAIR currently implements **20 constraints** covering:
 | **Precompile** | Precompile call validity |
 | **Gas** | Gas depletion validation |
 
-### Solution
+### Current Status
 
-Extend `EVMAIR.evaluateConstraint()` with full constraint set:
+**Implemented constraints** (EVMAIR lines 544-604):
+- Arithmetic: ADD, SUB, MUL, DIV, MOD, EXP, ADDMOD, MULMOD, SIGNEXTEND
+- Comparison: LT, GT, SLT, SGT
+- Bitwise: AND, OR, XOR, NOT, BYTE, SHL, SHR, SAR
+- Memory: MLOAD, MSTORE, MSTORE8
+- Control: JUMP, JUMPI
+- Calls: CALL, DELEGATECALL, STATICCALL, CREATE, CREATE2
+- Crypto: KECCAK256
 
-```swift
-// Add to EVMAIR.evaluateConstraint()
-case 0x05: constraint = evalSDIV(state)       // Signed division
-case 0x07: constraint = evalSMOD(state)       // Signed modulo
-case 0x0B: constraint = evalSIGNEXTEND(state)  // Sign extend
-case 0x0A: constraint = evalEXP(state)         // Exponentiation
-case 0x19: constraint = evalNOT(state)         // Bitwise NOT
-case 0x1A: constraint = evalBYTE(state)        // Byte extract
-case 0x1B: constraint = evalSHL(state)         // Shift left
-case 0x1C: constraint = evalSHR(state)         // Shift right
-case 0x1D: constraint = evalSAR(state)         // Arithmetic shift
-```
+### Known Issues
+
+| Constraint | Issue | Severity |
+|------------|-------|----------|
+| EXP | Simplified - only checks exp < 256, not actual result | Medium |
+| SDIV/SMOD | Uses unsigned division, may not handle signed semantics | Medium |
+| Stack validation | Only checks height change, not actual values | High |
 
 ---
 
@@ -280,27 +295,32 @@ case 0x1D: constraint = evalSAR(state)         // Arithmetic shift
 
 ### Status
 
-EIP-3540 (EOF) opcodes are defined in `EVMOpcodes.swift`:
-- `RJUMP` (0xE0), `RJUMPI` (0xE1), `RJUMPV` (0xE2)
-- `CALLF` (0xE3), `RETF` (0xE4), `JUMPF` (0xE5)
-- `MSTORESIZE` (0xEA), `TRACKSTORAGE` (0xEB)
+**Partial Implementation:**
+
+| Opcode | Status | Notes |
+|--------|--------|-------|
+| RJUMP (0xE0) | ✅ Implemented | Basic relative jump |
+| RJUMPI (0xE1) | ✅ Implemented | Conditional relative jump |
+| RJUMPV (0xE2) | ⚠️ Partial | Basic table dispatch |
+| CALLF (0xE3) | ⚠️ Stubbed | Simplified addressing, no frame save |
+| RETF (0xE4) | ✅ Basic | Basic return |
+| JUMPF (0xE5) | ⚠️ Stubbed | Simplified addressing |
+| DUPN (0xE8) | ✅ Implemented | Uses immediate byte |
+| SWAPN (0xE9) | ✅ Implemented | Uses immediate byte |
+| SLOADBYTES (0xE6) | ❌ Missing | Throws invalidOpcode |
+| SSTOREBYTES (0xE7) | ❌ Missing | Throws invalidOpcode |
+| MSTORESIZE (0xEA) | ❌ Missing | Throws invalidOpcode |
+| TRACKSTORAGE (0xEB) | ❌ Missing | Throws invalidOpcode |
+| COPYLOG (0xEC) | ❌ Missing | Throws invalidOpcode |
 
 ### Missing
 
-- EOF container validation (code section structure)
-- Jump table analysis
-- Stack validation per function
-
-### Solution
-
-```swift
-/// Validate EOF container structure
-public struct EOFValidator {
-    public func validateCodeSection(code: Bytes) -> Bool
-    public func buildJumpTable(code: Bytes) -> [UInt16]
-    public func validateStackBounds(code: Bytes) -> Bool
-}
-```
+- EOF container validation (magic bytes 0xEF00)
+- Jump table analysis / static analysis
+- CALLF/RETF stack frame management
+- Code section lookup (not simple funcIdx * 32)
+- Dynamic gas costs (EIP-4200/EIP-5450)
+- RJUMPV destination validation
 
 ---
 

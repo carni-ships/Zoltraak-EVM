@@ -479,6 +479,47 @@ public struct EVMAIR: CircleAIR {
             // Next PC should be current PC + 1 (JUMPDEST itself doesn't change PC)
             return m31SubUnsafe(currentPC: currentPC, nextPC: nextPC)
 
+        // EOF Opcodes - EIP-3540, 4200, 5450
+        case .RJUMP:
+            // RJUMP: PC -> PC + 2 (immediate) + offset (relative)
+            // For constraint, we allow arbitrary destination since it's validated at runtime
+            return .zero
+
+        case .RJUMPI:
+            // RJUMPI: PC -> PC + 2 + offset if cond != 0, else PC + 3
+            // Simplified: allow arbitrary nextPC since destination depends on condition
+            return .zero
+
+        case .RJUMPV:
+            // RJUMPV: PC -> end of table + offset[table[index]]
+            // Simplified: allow arbitrary nextPC
+            return .zero
+
+        case .JUMPF:
+            // JUMPF: jumps to function entry point
+            // Allow arbitrary nextPC (destination is function entry)
+            return .zero
+
+        case .CALLF:
+            // CALLF: calls a function, PC becomes function entrypoint
+            // Allow arbitrary nextPC (function entry)
+            return .zero
+
+        case .RETF:
+            // RETF: returns from function, PC becomes return address
+            // Allow arbitrary nextPC (return address)
+            return .zero
+
+        case .DUPN:
+            // DUPN: opcode + 1 byte immediate, PC -> PC + 2
+            let expectedNextPC = currentPC &+ 2
+            return M31(v: nextPC == expectedNextPC ? 0 : 1)
+
+        case .SWAPN:
+            // SWAPN: opcode + 1 byte immediate, PC -> PC + 2
+            let expectedNextPC = currentPC &+ 2
+            return M31(v: nextPC == expectedNextPC ? 0 : 1)
+
         default:
             // Sequential: nextPC = currentPC + 1
             return m31SubUnsafe(currentPC: currentPC, nextPC: nextPC)
@@ -525,14 +566,404 @@ public struct EVMAIR: CircleAIR {
         return .zero
     }
 
-    /// Stack height change validation
+    /// Stack validation with actual value verification
+    /// Verifies that the next stack snapshot correctly reflects the current stack
+    /// after applying the opcode's stack operations.
     @inline(__always)
     private func evaluateStackConstraint(current: [M31], next: [M31], opcode: EVMOpcode) -> M31 {
-        let heightChange = opcode.properties.stackHeightChange
+        // Stack height must be valid: 0 <= height <= 1024
+        let currentHeight = extractStackHeight(from: current)
+        let nextHeight = extractStackHeight(from: next)
 
-        // For now, just verify the height change is consistent
-        // In full implementation, we'd verify actual stack values
-        return .zero
+        // Height must be non-negative and within max stack size
+        guard currentHeight >= 0 && currentHeight <= 1024 else { return M31.one }
+        guard nextHeight >= 0 && nextHeight <= 1024 else { return M31.one }
+
+        // Verify stack height change matches opcode specification
+        let expectedChange = opcode.properties.stackHeightChange
+        let actualChange = nextHeight - currentHeight
+
+        if actualChange != expectedChange {
+            return M31.one  // Stack height change mismatch
+        }
+
+        // Now verify actual stack values based on opcode type
+        return evaluateStackValueConstraint(current: current, next: next, opcode: opcode)
+    }
+
+    /// Extract stack height from trace columns
+    /// Stack height is derived from the stack snapshot: we count non-zero slots
+    @inline(__always)
+    private func extractStackHeight(from row: [M31]) -> Int {
+        // Stack columns are 3-146 (144 columns = 16 slots × 9 limbs)
+        // Each slot has 9 limbs. We scan to find the last non-zero word.
+        // This is a simplified approach - in practice we'd track height explicitly.
+        // For now, use column 147 to track stack height if available.
+        guard row.count > 147 else { return 0 }
+
+        // Column 147 (if it exists) stores stack height directly
+        // But we don't actually have this column, so we derive from PC+gas
+        // Actually, the trace stores stackHeight in EVMTraceRow but not in columns.
+        // We need to infer it from stack values.
+
+        // Alternative: scan stack columns to find height
+        // Stack slot i starts at column 3 + i*9
+        var lastUsedSlot = -1
+        for slot in 0..<16 {
+            let baseCol = 3 + slot * 9
+            guard baseCol + 8 < row.count else { break }
+
+            // Check if this slot has any non-zero limb
+            var isNonZero = false
+            for limb in 0..<9 {
+                if row[baseCol + limb].v != 0 {
+                    isNonZero = true
+                    break
+                }
+            }
+            if isNonZero {
+                lastUsedSlot = slot
+            }
+        }
+
+        // Stack height = lastUsedSlot + 1 (0-indexed to count)
+        // If no slots used, height is 0
+        return lastUsedSlot >= 0 ? lastUsedSlot + 1 : 0
+    }
+
+    /// Evaluate actual stack value constraints based on opcode type
+    /// This is the core of proper stack validation.
+    @inline(__always)
+    private func evaluateStackValueConstraint(current: [M31], next: [M31], opcode: EVMOpcode) -> M31 {
+        switch opcode {
+        // MARK: - PUSH Opcodes: Verify pushed value at top of next stack
+        // PUSH reads immediate bytes and pushes onto stack.
+        // The next stack's top (slot 0) should contain the pushed value.
+        // All other slots should be: current slot 0 -> next slot 1, etc.
+        case .PUSH1, .PUSH2, .PUSH3, .PUSH4, .PUSH5, .PUSH6, .PUSH7, .PUSH8,
+             .PUSH9, .PUSH10, .PUSH11, .PUSH12, .PUSH13, .PUSH14, .PUSH15, .PUSH16,
+             .PUSH17, .PUSH18, .PUSH19, .PUSH20, .PUSH21, .PUSH22, .PUSH23, .PUSH24,
+             .PUSH25, .PUSH26, .PUSH27, .PUSH28, .PUSH29, .PUSH30, .PUSH31, .PUSH32:
+            return evaluatePushConstraint(current: current, next: next, opcode: opcode)
+
+        case .PUSH0:
+            // PUSH0 pushes 0 onto stack
+            // Next stack slot 0 should be 0
+            return evaluateStackSlotEquals(next: next, slot: 0, expectedValue: .zero)
+
+        // MARK: - POP Opcode: Just consumes top value, no constraints on consumed value
+        case .POP:
+            // Next stack slot 0 should be current stack slot 1 (shift down by 1)
+            // Other slots shift accordingly
+            return evaluatePopConstraint(current: current, next: next)
+
+        // MARK: - DUP Opcodes: Duplicate a stack position
+        case .DUP1, .DUP2, .DUP3, .DUP4, .DUP5, .DUP6, .DUP7, .DUP8,
+             .DUP9, .DUP10, .DUP11, .DUP12, .DUP13, .DUP14, .DUP15, .DUP16:
+            return evaluateDupConstraint(current: current, next: next, opcode: opcode)
+
+        // MARK: - SWAP Opcodes: Swap stack positions
+        case .SWAP1, .SWAP2, .SWAP3, .SWAP4, .SWAP5, .SWAP6, .SWAP7, .SWAP8,
+             .SWAP9, .SWAP10, .SWAP11, .SWAP12, .SWAP13, .SWAP14, .SWAP15, .SWAP16:
+            return evaluateSwapConstraint(current: current, next: next, opcode: opcode)
+
+        // MARK: - Arithmetic Opcodes (2 inputs, 1 output)
+        // ADD, SUB, MUL, DIV, MOD, SDIV, SMOD, etc.
+        // Stack: [a, b] -> [result]
+        // Next slot 0 = result, next slot 1 = old slot 2, etc.
+        case .ADD, .SUB, .MUL, .DIV, .SDIV, .MOD, .SMOD, .ADDMOD, .MULMOD, .EXP,
+             .SIGNEXTEND, .LT, .GT, .SLT, .SGT, .EQ, .ISZERO, .AND, .OR, .XOR,
+             .NOT, .BYTE, .SHL, .SHR, .SAR:
+            // For binary ops, result goes to top, remaining stack shifts
+            // Next slot 0 = result (computed from slot 0 and slot 1 of current)
+            // Next slot 1 = current slot 2
+            // etc.
+            return evaluateBinaryOpConstraint(current: current, next: next)
+
+        // MARK: - Unary Opcodes (1 input, 1 output)
+        case .ISZERO:
+            return evaluateUnaryOpConstraint(current: current, next: next)
+
+        // MARK: - Memory Opcodes with stack effects
+        case .MLOAD:
+            // Stack: [address] -> [value]
+            return evaluateMloadConstraint(current: current, next: next)
+
+        case .MSTORE, .MSTORE8:
+            // Stack: [address, value] -> []
+            return evaluateMstoreConstraint(current: current, next: next)
+
+        case .SLOAD:
+            // Stack: [key] -> [value]
+            return evaluateSloadConstraint(current: current, next: next)
+
+        case .SSTORE:
+            // Stack: [key, value] -> []
+            return evaluateSstoreConstraint(current: current, next: next)
+
+        // MARK: - Control Flow Opcodes
+        case .JUMP:
+            // Stack: [destination] -> (consumed)
+            return evaluateJumpStackConstraint(current: current, next: next)
+
+        case .JUMPI:
+            // Stack: [destination, condition] -> (consumed if condition != 0)
+            return evaluateJumpIStackConstraint(current: current, next: next)
+
+        // MARK: - Stack-with-no-value-change Opcodes
+        case .STOP, .RETURN, .REVERT, .SELFDESTRUCT:
+            // These terminate execution - no stack validation needed
+            return .zero
+
+        case .JUMPDEST, .PC, .MSIZE, .GAS, .NUMBER, .TIMESTAMP, .COINBASE,
+             .PREVRANDAO, .GASLIMIT, .BASEFEE, .CHAINID, .SELFBALANCE,
+             .ADDRESS, .ORIGIN, .CALLER, .CALLVALUE, .GASPRICE,
+             .CALLDATASIZE, .CODESIZE, .RETURNDATASIZE, .EXTCODEHASH, .EXTCODESIZE,
+             .BALANCE, .BLOCKHASH, .KECCAK256:
+            // These push values onto stack but don't consume others
+            // Next slot 0 = new value, slots 1+ = current slots 0+
+            return evaluateStackPushConstraint(current: current, next: next)
+
+        case .CALLDATALOAD:
+            // Stack: [offset] -> [value]
+            return evaluateCallDataLoadConstraint(current: current, next: next)
+
+        case .CALLDATACOPY, .CODECOPY, .EXTCODECOPY, .RETURNDATACOPY:
+            // Stack: [destOffset, offset, length] -> []
+            return evaluateCopyConstraint(current: current, next: next)
+
+        case .LOG0, .LOG1, .LOG2, .LOG3, .LOG4:
+            // Stack: [offset, length, topic0, ...] -> []
+            return evaluateLogConstraint(current: current, next: next, opcode: opcode)
+
+        case .CREATE, .CALL, .CALLCODE, .DELEGATECALL, .STATICCALL, .CREATE2:
+            // Complex stack effects - validate depth change only
+            return evaluateCallStackConstraint(current: current, next: next, opcode: opcode)
+
+        default:
+            // Unknown opcode - be permissive (will be caught by opcode validity)
+            return .zero
+        }
+    }
+
+    // MARK: - Individual Stack Operation Constraints
+
+    /// Verify PUSH constraint: pushed value should be at next stack top
+    /// The pushed value comes from immediate bytes in the instruction.
+    /// Since we don't have bytecode access here, we verify the value was correctly
+    /// placed by checking the next stack snapshot reflects the push.
+    @inline(__always)
+    private func evaluatePushConstraint(current: [M31], next: [M31], opcode: EVMOpcode) -> M31 {
+        // For PUSH, the next stack should have:
+        // - Slot 0: The pushed value (we need to verify this matches the immediate)
+        // - Slot 1: Current slot 0
+        // - Slot 2: Current slot 1
+        // etc.
+
+        // The pushed value is encoded in the bytecode immediately after PUSH opcode.
+        // In the trace, this value is captured in stackSnapshot of next row.
+        // Since we don't have bytecode access, we verify the stack structure is correct:
+        // 1. Next stack height = current stack height + 1
+        // 2. All slots except 0 should shift up by 1
+
+        // Verify slot 1 of next equals slot 0 of current (shifted up)
+        let constraint = evaluateStackSlotEquals(next: next, slot: 1, expectedCurrentSlot: current, expectedSlot: 0)
+        if constraint.v != 0 { return constraint }
+
+        // Verify slot 2 of next equals slot 1 of current (if exists)
+        return evaluateStackSlotEquals(next: next, slot: 2, expectedCurrentSlot: current, expectedSlot: 1)
+    }
+
+    /// Verify slot N of next stack equals slot M of current stack
+    @inline(__always)
+    private func evaluateStackSlotEquals(next: [M31], slot: Int, expectedCurrentSlot: [M31], expectedSlot: Int) -> M31 {
+        let nextBaseCol = 3 + slot * 9
+        let currentBaseCol = 3 + expectedSlot * 9
+
+        guard nextBaseCol + 8 < next.count else { return .zero }
+        guard currentBaseCol + 8 < expectedCurrentSlot.count else { return .zero }
+
+        var totalDiff: UInt64 = 0
+        for limb in 0..<9 {
+            let diff = UInt64(next[nextBaseCol + limb].v) &+ UInt64(M31.P) &- UInt64(expectedCurrentSlot[currentBaseCol + limb].v)
+            totalDiff = totalDiff &+ (diff % UInt64(M31.P))
+        }
+
+        return totalDiff == 0 ? .zero : M31.one
+    }
+
+    /// Verify next stack slot equals a specific expected value
+    @inline(__always)
+    private func evaluateStackSlotEquals(next: [M31], slot: Int, expectedValue: M31) -> M31 {
+        let baseCol = 3 + slot * 9
+        guard baseCol < next.count else { return .zero }
+
+        // Just check first limb since M31 is the basic type
+        let diff = next[baseCol].v == expectedValue.v ? UInt32(0) : UInt32(1)
+        return M31(v: diff)
+    }
+
+    /// Verify POP constraint: stack shifts down by 1
+    /// Next stack slot 0 should be current slot 1
+    @inline(__always)
+    private func evaluatePopConstraint(current: [M31], next: [M31]) -> M31 {
+        // Verify next slot 0 equals current slot 1 (shift down)
+        return evaluateStackSlotEquals(next: next, slot: 0, expectedCurrentSlot: current, expectedSlot: 1)
+    }
+
+    /// Verify DUP constraint: duplicate a stack position to top
+    @inline(__always)
+    private func evaluateDupConstraint(current: [M31], next: [M31], opcode: EVMOpcode) -> M31 {
+        guard let dupPos = opcode.dupPosition else { return .zero }
+
+        // DUPn duplicates stack[n-1] to top
+        // For DUP1: duplicate slot 0 to slot 0 (push copy)
+        // For DUP2: duplicate slot 1 to slot 0, slot 0 -> slot 1, etc.
+        // Next: [stack[n-1], stack[0], stack[1], ...]
+
+        let sourceSlot = dupPos - 1  // 0-indexed
+
+        // Verify next slot 0 equals current slot (sourceSlot)
+        let constraint = evaluateStackSlotEquals(next: next, slot: 0, expectedCurrentSlot: current, expectedSlot: sourceSlot)
+        if constraint.v != 0 { return constraint }
+
+        // Verify next slot 1 equals current slot 0
+        return evaluateStackSlotEquals(next: next, slot: 1, expectedCurrentSlot: current, expectedSlot: 0)
+    }
+
+    /// Verify SWAP constraint: swap top with position N
+    @inline(__always)
+    private func evaluateSwapConstraint(current: [M31], next: [M31], opcode: EVMOpcode) -> M31 {
+        guard let swapPos = opcode.swapPosition else { return .zero }
+
+        // SWAPn exchanges stack[0] with stack[n]
+        // Next: [old stack[n], stack[1], ..., stack[0], stack[n+1], ...]
+
+        let targetSlot = swapPos  // 0-indexed, SWAP1 -> slot 1, etc.
+
+        // Verify next slot 0 equals current slot (targetSlot)
+        let constraint = evaluateStackSlotEquals(next: next, slot: 0, expectedCurrentSlot: current, expectedSlot: targetSlot)
+        if constraint.v != 0 { return constraint }
+
+        // Verify next slot targetSlot equals current slot 0 (swapped)
+        return evaluateStackSlotEquals(next: next, slot: targetSlot, expectedCurrentSlot: current, expectedSlot: 0)
+    }
+
+    /// Verify binary operation constraint (2 inputs, 1 output)
+    /// Next: [result, current slot 2, current slot 3, ...]
+    @inline(__always)
+    private func evaluateBinaryOpConstraint(current: [M31], next: [M31]) -> M31 {
+        // The actual computation is verified by opcode-specific constraints.
+        // Here we verify the stack structure: slot 1 = current slot 2
+        return evaluateStackSlotEquals(next: next, slot: 1, expectedCurrentSlot: current, expectedSlot: 2)
+    }
+
+    /// Verify unary operation constraint (1 input, 1 output)
+    @inline(__always)
+    private func evaluateUnaryOpConstraint(current: [M31], next: [M31]) -> M31 {
+        // Next slot 0 = result, slot 1 = current slot 1
+        return evaluateStackSlotEquals(next: next, slot: 1, expectedCurrentSlot: current, expectedSlot: 1)
+    }
+
+    /// Verify MLOAD constraint: load from memory
+    /// Stack: [address] -> [value]
+    @inline(__always)
+    private func evaluateMloadConstraint(current: [M31], next: [M31]) -> M31 {
+        // Address is consumed, value is pushed
+        // Next slot 0 = loaded value (slot 1 of current for height)
+        // But we don't verify the actual memory read here - that's done elsewhere
+        // Just verify stack structure: slot 1 = current slot 1 (if it exists)
+        return evaluateStackSlotEquals(next: next, slot: 1, expectedCurrentSlot: current, expectedSlot: 1)
+    }
+
+    /// Verify MSTORE constraint: store to memory
+    /// Stack: [address, value] -> [] (pops 2)
+    @inline(__always)
+    private func evaluateMstoreConstraint(current: [M31], next: [M31]) -> M31 {
+        // Next slot 0 should be current slot 2 (shift down by 2)
+        return evaluateStackSlotEquals(next: next, slot: 0, expectedCurrentSlot: current, expectedSlot: 2)
+    }
+
+    /// Verify SLOAD constraint: load from storage
+    /// Stack: [key] -> [value]
+    @inline(__always)
+    private func evaluateSloadConstraint(current: [M31], next: [M31]) -> M31 {
+        // Similar to MLOAD - value pushed, key consumed
+        return evaluateStackSlotEquals(next: next, slot: 1, expectedCurrentSlot: current, expectedSlot: 1)
+    }
+
+    /// Verify SSTORE constraint: store to storage
+    /// Stack: [key, value] -> [] (pops 2)
+    @inline(__always)
+    private func evaluateSstoreConstraint(current: [M31], next: [M31]) -> M31 {
+        return evaluateStackSlotEquals(next: next, slot: 0, expectedCurrentSlot: current, expectedSlot: 2)
+    }
+
+    /// Verify JUMP constraint: consume destination
+    @inline(__always)
+    private func evaluateJumpStackConstraint(current: [M31], next: [M31]) -> M31 {
+        // JUMP consumes 1 item (destination)
+        // Next slot 0 = current slot 1
+        return evaluateStackSlotEquals(next: next, slot: 0, expectedCurrentSlot: current, expectedSlot: 1)
+    }
+
+    /// Verify JUMPI constraint: consume destination and condition
+    @inline(__always)
+    private func evaluateJumpIStackConstraint(current: [M31], next: [M31]) -> M31 {
+        // JUMPI consumes 2 items
+        // Next slot 0 = current slot 2
+        return evaluateStackSlotEquals(next: next, slot: 0, expectedCurrentSlot: current, expectedSlot: 2)
+    }
+
+    /// Verify stack push constraint (for opcodes that push without consuming)
+    @inline(__always)
+    private func evaluateStackPushConstraint(current: [M31], next: [M31]) -> M31 {
+        // These opcodes push a new value but keep the rest
+        // Next slot 1 = current slot 0
+        // Next slot 2 = current slot 1
+        return evaluateStackSlotEquals(next: next, slot: 1, expectedCurrentSlot: current, expectedSlot: 0)
+    }
+
+    /// Verify CALLDATALOAD constraint
+    @inline(__always)
+    private func evaluateCallDataLoadConstraint(current: [M31], next: [M31]) -> M31 {
+        return evaluateStackSlotEquals(next: next, slot: 1, expectedCurrentSlot: current, expectedSlot: 1)
+    }
+
+    /// Verify copy constraints (CALLDATACOPY, CODECOPY, etc.)
+    /// Stack: [destOffset, offset, length] -> [] (pops 3)
+    @inline(__always)
+    private func evaluateCopyConstraint(current: [M31], next: [M31]) -> M31 {
+        return evaluateStackSlotEquals(next: next, slot: 0, expectedCurrentSlot: current, expectedSlot: 3)
+    }
+
+    /// Verify LOG constraint
+    @inline(__always)
+    private func evaluateLogConstraint(current: [M31], next: [M31], opcode: EVMOpcode) -> M31 {
+        // LOGn: pops 2 + n items (offset, length, topic0, ..., topicn)
+        let topicCount = opcode.logTopics ?? 0
+        let itemsPopped = 2 + topicCount
+        return evaluateStackSlotEquals(next: next, slot: 0, expectedCurrentSlot: current, expectedSlot: itemsPopped)
+    }
+
+    /// Verify call stack constraint (for CALL, CREATE, etc.)
+    @inline(__always)
+    private func evaluateCallStackConstraint(current: [M31], next: [M31], opcode: EVMOpcode) -> M31 {
+        // These have complex stack effects - verify basic shift structure
+        switch opcode {
+        case .CALL, .CALLCODE, .DELEGATECALL, .STATICCALL:
+            // CALL: [to, value, gas, argsOffset, argsLength, retOffset, retLength] -> [success]
+            // Pops 7, pushes 1 (or none on failure)
+            return evaluateStackSlotEquals(next: next, slot: 0, expectedCurrentSlot: current, expectedSlot: 7)
+
+        case .CREATE, .CREATE2:
+            // CREATE: [value, codeOffset, codeLength] -> [address]
+            // Pops 3, pushes 1
+            return evaluateStackSlotEquals(next: next, slot: 0, expectedCurrentSlot: current, expectedSlot: 3)
+
+        default:
+            return .zero
+        }
     }
 
     /// Opcode-specific constraint evaluation

@@ -269,7 +269,12 @@ public struct CallFrame: Sendable {
     public var callValue: M31Word
     public var staticFlag: Bool
 
-    public init(code: [UInt8] = [], calldata: [UInt8] = []) {
+    // EOF-specific fields
+    public var isEOF: Bool
+    public var codeSectionIndex: Int  // Which code section this frame uses
+    public var returnStack: [Int]  // Stack of return PCs for EOF CALLF/RETF
+
+    public init(code: [UInt8] = [], calldata: [UInt8] = [], isEOF: Bool = false, codeSectionIndex: Int = 0) {
         self.programCounter = 0
         self.code = code
         self.calldata = calldata
@@ -279,6 +284,9 @@ public struct CallFrame: Sendable {
         self.caller = .zero
         self.callValue = .zero
         self.staticFlag = false
+        self.isEOF = isEOF
+        self.codeSectionIndex = codeSectionIndex
+        self.returnStack = []
     }
 }
 
@@ -378,6 +386,10 @@ public struct EVMState: Sendable {
     // Account management
     public var accountManager: AccountManager
 
+    // EOF (Ethereum Object Format) support
+    public var eofContainer: EOFContainer?
+    public var eofAnalysis: [Int: EOFCodeAnalysis]  // codeSectionIndex -> analysis
+
     public init(block: BlockContext = BlockContext(), tx: TransactionContext = TransactionContext()) {
         self.stack = EVMStack()
         self.memory = EVMMemory()
@@ -389,6 +401,8 @@ public struct EVMState: Sendable {
         self.selfBalance = .zero
         self.running = true
         self.reverted = false
+        self.eofContainer = nil
+        self.eofAnalysis = [:]
         self.revertedData = []
         self.block = block
         self.tx = tx

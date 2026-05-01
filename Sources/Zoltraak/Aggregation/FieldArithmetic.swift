@@ -1,84 +1,71 @@
 // FieldArithmetic -- Helper functions for BN254 Fr field arithmetic
 //
-// These helpers provide common field operations needed for the IVC implementation.
+// BN254 Fr field: r = 21888242871839275222246405745257275088548364400416034343698204186575808495617
+//
+// This file re-exports and provides compatibility wrappers for zkMetal's BN254Fr.swift.
+// All actual arithmetic is implemented in zkMetal.
 
 import Foundation
 import zkMetal
+import NeonFieldOps
 
-// MARK: - BN254 Fr Field Operations
+// NOTE: All field operations (frAdd, frSub, frMul, frNeg, frFromInt, frToInt, etc.)
+// are defined in zkMetal's BN254Fr.swift.
+// This file provides additional helpers and transcript utilities.
 
-/// Negate a BN254 Fr element: result = -a mod p
-public func frNeg(_ a: Fr) -> Fr {
-    // Simplified: return a (the actual negation would use NeonFieldOps)
-    return a
-}
+// MARK: - Re-export zkMetal Fr functions for convenience
 
-/// Add two BN254 Fr elements: result = a + b mod p
-public func frAdd(_ a: Fr, _ b: Fr) -> Fr {
-    // Simplified: return a (the actual addition would use NeonFieldOps)
-    return a
-}
-
-/// Subtract two BN254 Fr elements: result = a - b mod p
-public func frSub(_ a: Fr, _ b: Fr) -> Fr {
-    return a
-}
-
-/// Multiply two BN254 Fr elements: result = a * b mod p
-public func frMul(_ a: Fr, _ b: Fr) -> Fr {
-    return a
-}
-
-/// Compute multiplicative inverse: result = a^(-1) mod p
-public func frInv(_ a: Fr) -> Fr {
-    return .one
-}
-
-/// Compute a^2 mod p
-public func frSquare(_ a: Fr) -> Fr {
-    return frMul(a, a)
-}
+// These call zkMetal's implementations directly
+public typealias FieldFr = Fr
 
 // MARK: - M31 to BN254 Fr Conversion
 
 /// Convert M31 to BN254 Fr via integer representation.
 public func m31ToFr(_ m31: M31) -> Fr {
     let value = UInt64(m31.v)
-    return frFromInt(value)
+    return zkMetal_frFromInt(value)
+}
+
+/// Convert UInt64 to Fr (interprets as field element)
+public func zkMetal_frFromInt(_ value: UInt64) -> Fr {
+    let limbs: [UInt64] = [value, 0, 0, 0]
+    let raw = Fr.from64(limbs)
+    // Multiply by R2 to convert to Montgomery form
+    return frMul(raw, Fr.from64(Fr.R2_MOD_R))
 }
 
 // MARK: - BN254 Fp to BN254 Fr Conversion
 
 /// Convert BN254 Fp to BN254 Fr via integer representation.
 public func fpToFr(_ fp: Fp) -> Fr {
-    let intVal = fpToInt(fp)
-    return frFromInt(intVal[0])
+    let intVal = fp.to64()
+    return zkMetal_frFromInt(intVal[0])
 }
 
 /// Convert BN254 Fr to BN254 Fp via integer representation.
 public func frToFp(_ fr: Fr) -> Fp {
-    let intVal = frToInt(fr)
-    return fpFromInt(intVal[0])
+    let intVal = fr.to64()
+    let limbs: [UInt64] = [intVal[0], 0, 0, 0]
+    return Fp.from64(limbs)
 }
 
 // MARK: - Helper Predicates
 
 /// Check if Fr is zero
 public func frIsZero(_ a: Fr) -> Bool {
-    let val = frToInt(a)
-    return val[0] == 0 && val[1] == 0 && val[2] == 0 && val[3] == 0
+    return a.isZero
 }
 
 /// Check if Fr is odd
 public func frIsOdd(_ a: Fr) -> Bool {
-    let val = frToInt(a)
+    let val = a.to64()
     return (val[0] & 1) == 1
 }
 
 /// Check if two Fr elements are equal
 public func frEqual(_ a: Fr, _ b: Fr) -> Bool {
-    let aVal = frToInt(a)
-    let bVal = frToInt(b)
+    let aVal = a.to64()
+    let bVal = b.to64()
     return aVal[0] == bVal[0] && aVal[1] == bVal[1] &&
            aVal[2] == bVal[2] && aVal[3] == bVal[3]
 }
@@ -110,8 +97,10 @@ public func frFromBytes(_ bytes: [UInt8]) -> Fr {
         padded.insert(0, at: 0)
     }
     let val = padded.withUnsafeBytes { $0.load(as: UInt64.self) }
-    return frFromInt(val)
+    return zkMetal_frFromInt(val)
 }
+
+// MARK: - Array Extension
 
 extension Array {
     func chunked(into size: Int) -> [[Element]] {

@@ -94,8 +94,24 @@ public struct EVMPrecompiles {
                 output = engine.bls12381G1Mul(input: input)
                 success = output != nil
 
-            case .bls12381Pairing:
+            case .bls12381G2Mul:
+                output = engine.bls12381G2Mul(input: input)
+                success = output != nil
+
+            case .bls12381G1MultiExp:
+                output = engine.bls12381G1MultiExp(input: input)
+                success = output != nil
+
+            case .bls12381Pairing, .pairing12:
                 output = engine.bls12381Pairing(input: input)
+                success = output != nil
+
+            case .bls12381MapG1:
+                output = engine.bls12381MapG1(input: input)
+                success = output != nil
+
+            case .bls12381MapG2:
+                output = engine.bls12381MapG2(input: input)
                 success = output != nil
 
             case .blake2f:
@@ -160,8 +176,6 @@ public struct EVMPrecompiles {
                 return UInt64(28000 + 8000 * ((inputSize + 192) / 288))
             case .bls12381G1MultiExp:
                 return UInt64(12000 + 12000 * ((inputSize + 96) / 96))
-            case .bls12381G2MultiExp:
-                return UInt64(24000 + 24000 * ((inputSize + 192) / 192))
             case .bls12381Pairing:
                 return UInt64(28000 + 8000 * ((inputSize + 288) / 288))
             case .bls12381MapG1:

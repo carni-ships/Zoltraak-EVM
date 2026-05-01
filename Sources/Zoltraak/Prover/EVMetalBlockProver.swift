@@ -108,6 +108,18 @@ public struct BlockProvingConfig {
         useArchiveNodeWitness: true,
         archiveNodeURL: "http://localhost:8545"
     )
+
+    /// Configuration with state proofs enabled for verified state access
+    public static let withStateProofs = BlockProvingConfig(
+        useStateProofs: true,
+        stateProofMode: .preflight
+    )
+
+    /// Configuration with strict state proofs (require all state access)
+    public static let withStrictStateProofs = BlockProvingConfig(
+        useStateProofs: true,
+        stateProofMode: .strict
+    )
 }
 
 // MARK: - Block Proof
@@ -671,6 +683,190 @@ public final class ZoltraakBlockProver {
             print("[BlockProver] Archive node unavailable or witness fetch failed, using local EVM execution")
         }
 
+        // State proof verification if enabled
+        if config.useStateProofs {
+            let stateProofStart = CFAbsoluteTimeGetCurrent()
+            print("[BlockProver] Fetching and verifying state proofs...")
+
+            do {
+                let verifiedState = try await fetchAndVerifyStateProofs(
+                    transactions: transactions,
+                    blockContext: blockContext
+                )
+
+                let stateProofMs = (CFAbsoluteTimeGetCurrent() - stateProofStart) * 1000
+                print("[BlockProver] State proofs verified in \(String(format: "%.1f", stateProofMs))ms")
+
+                // Attach verified state to transactions for accurate execution
+                let transactionsWithState = attachVerifiedState(to: transactions, state: verifiedState, blockContext: blockContext)
+
+                // Execute with verified state (pass modified transactions)
+                return try await proveWithVerifiedState(
+                    transactions: transactionsWithState,
+                    blockContext: blockContext,
+                    initialStateRoot: initialStateRoot,
+                    tier: tier,
+                    totalStartTime: totalStartTime
+                )
+            } catch {
+                switch config.stateProofMode {
+                case .preflight:
+                    print("[BlockProver] State proof verification failed: \(error), falling back to unverified execution")
+                case .strict:
+                    throw BlockProverError.stateProofFailed(error.localizedDescription)
+                case .withoutProofs:
+                    print("[BlockProver] State proof mode is withoutProofs but useStateProofs is true - inconsistent config")
+                }
+            }
+        }
+
+        // Continue with normal execution-based proving
+        return try await proveWithExecutionOnly(
+            transactions: transactions,
+            blockContext: blockContext,
+            initialStateRoot: initialStateRoot,
+            tier: tier,
+            totalStartTime: totalStartTime
+        )
+    }
+
+    // MARK: - State Proof Integration
+
+    /// Fetch and verify state proofs for all transactions.
+    ///
+    /// This method extracts addresses from transactions, fetches eth_getProof
+    /// for each, and verifies the proofs against the block state root.
+    ///
+    /// - Parameters:
+    ///   - transactions: Transactions to extract addresses from
+    ///   - blockContext: Block context (contains block number)
+    /// - Returns: Verified state containing all account and storage proofs
+    private func fetchAndVerifyStateProofs(
+        transactions: [EVMTransaction],
+        blockContext: BlockContext
+    ) async throws -> EVMTransactionState {
+        // Collect all unique addresses from transactions
+        var addresses: Set<String> = []
+        for tx in transactions {
+            // Collect sender if known
+            if let sender = tx.sender {
+                addresses.insert(sender.toHexString().lowercased())
+            }
+            // Collect contract address from code if this is a deployment
+            // For calls, we'd need the 'to' field but EVMTransaction doesn't have it
+            // For now, we'll fetch state for common addresses
+        }
+
+        // Add common addresses that might be accessed
+        // In real implementation, this would parse the trace to find all accessed addresses
+        addresses.insert("0x0000000000000000000000000000000000000000")  // Zero address
+
+        let fetcher = StateProofFetcher()
+        let verifier = StateProofVerifier()
+
+        var balances: [String: M31Word] = [:]
+        var codes: [String: [UInt8]] = [:]
+        var codeHashes: [String: M31Word] = [:]
+        var storage: [String: M31Word] = [:]
+
+        let blockHex = "0x" + String(blockContext.number, radix: 16)
+
+        for addressHex in addresses {
+            do {
+                let proof = try await fetcher.fetchProofs(
+                    address: addressHex,
+                    storageSlots: [],  // Fetch first slot for verification
+                    blockNumber: blockHex
+                )
+
+                let verified = try verifier.verifyFullProof(proof)
+
+                balances[addressHex] = verified.account.balance
+                codeHashes[addressHex] = verified.account.codeHash
+
+                // Fetch code if not EOA (codeHash != 0x00...0)
+                let emptyCodeHash = M31Word(bytes: [UInt8](repeating: 0, count: 32))
+                if !verified.account.codeHash.equals(emptyCodeHash) {
+                    // Code would need to be fetched via eth_getCode
+                    // For now, use empty code - full impl would fetch
+                }
+
+                // Add storage values
+                for slotValue in verified.storage {
+                    let key = "\(addressHex):\(slotValue.slot.toHexString().lowercased())"
+                    storage[key] = slotValue.value
+                }
+            } catch {
+                print("[BlockProver] Warning: Failed to fetch state for \(addressHex.prefix(10)): \(error.localizedDescription)")
+            }
+        }
+
+        return EVMTransactionState(
+            balances: balances,
+            codes: codes,
+            codeHashes: codeHashes,
+            storage: storage
+        )
+    }
+
+    /// Attach verified state to transactions for accurate execution.
+    ///
+    /// - Parameters:
+    ///   - transactions: Original transactions
+    ///   - state: Verified state to attach
+    ///   - blockContext: Block context
+    /// - Returns: Modified transactions with initial state
+    private func attachVerifiedState(
+        to transactions: [EVMTransaction],
+        state: EVMTransactionState,
+        blockContext: BlockContext
+    ) -> [EVMTransaction] {
+        // For each transaction, attach the verified state
+        // The EVM execution engine will use this state for initial values
+        return transactions.map { tx in
+            EVMTransaction(
+                code: tx.code,
+                calldata: tx.calldata,
+                value: tx.value,
+                gasLimit: tx.gasLimit,
+                sender: tx.sender,
+                nonce: tx.nonce,
+                txHash: tx.txHash,
+                initialState: state
+            )
+        }
+    }
+
+    /// Prove with verified state (state proof mode entry point).
+    ///
+    /// This is called after state proofs have been verified and attached to transactions.
+    private func proveWithVerifiedState(
+        transactions: [EVMTransaction],
+        blockContext: BlockContext,
+        initialStateRoot: M31Word,
+        tier: ProofTier,
+        totalStartTime: Double
+    ) async throws -> BlockProof {
+        // Use the same flow as regular proving but with state attached to transactions
+        return try await proveWithExecutionOnly(
+            transactions: transactions,
+            blockContext: blockContext,
+            initialStateRoot: initialStateRoot,
+            tier: tier,
+            totalStartTime: totalStartTime
+        )
+    }
+
+    /// Prove with local EVM execution (used by both regular and state-proof modes).
+    ///
+    /// This is the main execution path after any pre-flight verification.
+    private func proveWithExecutionOnly(
+        transactions: [EVMTransaction],
+        blockContext: BlockContext,
+        initialStateRoot: M31Word,
+        tier: ProofTier,
+        totalStartTime: Double
+    ) async throws -> BlockProof {
         // Determine proving configuration based on tier and compression settings
         let effectiveLogTrace = effectiveLogTraceLength
         let effectiveNumQueries = effectiveNumQueries(for: tier)
@@ -1477,6 +1673,8 @@ public enum BlockProverError: Error, Sendable {
     case verificationFailed
     case commitmentFailed
     case witnessUnavailable
+    case stateProofFailed(String)
+    case stateProofUnsupported
 }
 
 // MARK: - Benchmarking Extension

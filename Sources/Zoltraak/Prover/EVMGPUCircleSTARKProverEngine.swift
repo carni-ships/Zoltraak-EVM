@@ -439,19 +439,15 @@ public final class EVMGPUCircleSTARKProverEngine {
 
     /// Build Merkle trees using GPU when available, CPU fallback otherwise
     private func buildMerkleTreesGPUOrCPU(columns: [[M31]], count: Int) throws -> [[M31Digest]] {
+        // Note: GPU tree building (batch or single) may produce zero roots for large n (131072)
+        // Always use CPU trees for correctness when batch GPU fails
         var trees = [[M31Digest]]()
         trees.reserveCapacity(columns.count)
 
-        if let gpuMerkle = gpuMerkleEngine {
-            for col in columns {
-                let tree = try gpuMerkle.buildTree(values: col, count: count)
-                trees.append(tree)
-            }
-        } else {
-            for col in columns {
-                let tree = buildPoseidon2M31MerkleTree(col, count: count)
-                trees.append(tree)
-            }
+        // Always use CPU for correctness when GPU batch failed
+        for col in columns {
+            let tree = buildPoseidon2M31MerkleTree(col, count: count)
+            trees.append(tree)
         }
 
         return trees
@@ -474,7 +470,21 @@ public final class EVMGPUCircleSTARKProverEngine {
         // buildTreesBatchGPU uses batched internal node processing (all trees at once per level)
         let (roots, treeBuf, nodesPerTree) = try gpuMerkle.buildTreesBatchGPU(columns: columns, count: count)
 
+        // Verify GPU roots are non-zero before using GPU trees
+        let hasNonZeroRoots = roots.contains { $0.values.contains { $0.v != 0 } }
+        guard hasNonZeroRoots else {
+            fputs("[GPU Prover] buildGPUBuffersForProof: GPU tree building produced zero roots, using CPU fallback\n", stderr)
+            // Fall back to CPU trees (not GPU single-tree which has same issue)
+            self.traceTreeBuffers = []
+            self.traceTreeNumLeaves = 0
+            return columns.map { col in
+                let tree = buildPoseidon2M31MerkleTree(col, count: count)
+                return tree[2 * count - 2]
+            }
+        }
+
         // Split combined buffer into individual tree buffers for GPU proof generation
+        // Buffer layout is TREE-FIRST: each tree has treeSize = 2*n-1 nodes consecutive
         let nodeSize = 8
         let treeNodeCount = 2 * count - 1
         let numTrees = columns.count
@@ -769,7 +779,7 @@ public final class EVMGPUCircleSTARKProverEngine {
         // Check if GPU proof generation is available
         // GPU proofs require GPUMerkleTreeM31Engine with buildTreeWithBuffer support
         // Uses poseidon2_m31_merkle_proof_batch kernel which correctly handles TREE_FIRST layout
-        let useGPUProofs = true && gpuMerkleEngine != nil && !traceTreeBuffers.isEmpty
+        let useGPUProofs = gpuMerkleEngine != nil && !traceTreeBuffers.isEmpty
         print("[GPU Prover] Query: GPU proofs=\(useGPUProofs), buffers=\(traceTreeBuffers.count), numLeaves=\(traceTreeNumLeaves), cols=\(numProvingCols), queries=\(friProof.queryIndices.count)")
 
         if useGPUProofs {
@@ -809,6 +819,7 @@ public final class EVMGPUCircleSTARKProverEngine {
                 }
 
                 // Use GPU to generate proofs for all columns at once
+                // Trees were built with buildTreesBatchGPU (tree-first layout)
                 let gpuProofs = try gpuMerkleEngine!.generateProofsGPU(
                     treeBuffer: combinedTreeBuf,
                     numTrees: numProvingCols,
