@@ -250,8 +250,28 @@ public final class ZoltraakIVCBlockProver: Sendable {
 
     // MARK: - Private Helpers
 
+    /// Parse CircleSTARKProof from block proof data.
+    ///
+    /// The block prover serializes GPU proofs using serializeGPUSTARKProof(),
+    /// which stores GPUCircleSTARKProverProof data. We need to deserialize this
+    /// and adapt it to CircleSTARKProof format for the IVC verifier circuit.
+    ///
+    /// CPU proofs are serialized using CircleSTARKProof.serialize() and start
+    /// with "CSTK" magic bytes. GPU proofs start with trace commitment count.
     private func parseCircleSTARKProof(from data: Data) throws -> CircleSTARKProof {
-        return try deserializeCircleSTARKProof(from: data)
+        // Detect format: "CSTK" (0x43 0x53 0x54 0x4B) for CPU proofs, otherwise GPU
+        let isCPUFormat = data.count >= 4 &&
+            data[0] == 0x43 && data[1] == 0x53 && data[2] == 0x54 && data[3] == 0x4B
+
+        if isCPUFormat {
+            // CPU proof format - use standard deserialization
+            return try deserializeCircleSTARKProof(from: data)
+        } else {
+            // GPU proof format - GPU proofs require internal zkMetal types for full IVC
+            // For now, throw an error since GPU proving uses a different proof format
+            // that requires zkMetal SDK changes to support properly
+            throw IVCProverError.proofParsingFailed
+        }
     }
 
     private func computeTraceRoot(from commitments: [M31Digest]) -> Fr {
