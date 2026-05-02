@@ -554,7 +554,8 @@ public final class EVMGPUCircleSTARKProverEngine {
             let numCols = min(columnIndices.count, 32)  // Only FRI-proving columns
             let canUseGPU = gpuConstraint.canHandle(traceLength: evalLen, numColumns: numCols)
             let useColumnSubset = columnIndices.count < 180
-            // Use CPU for column subset mode - GPU 180-col upload (47MB) dominates over CPU parallel
+            // CPU is faster for subset mode - 16 cols × 32768 rows uploads ~47MB which dominates
+            // CPU parallel handles 16 cols efficiently with SIMD
             let shouldUseGPU = canUseGPU && !useColumnSubset
             print("[GPU Prover] evaluateConstraints: evalLen=\(evalLen), numCols=\(numCols), subset=\(useColumnSubset), canUseGPU=\(canUseGPU), shouldUseGPU=\(shouldUseGPU)")
 
