@@ -112,6 +112,26 @@ public struct BatchProverConfig {
         criticalColumnIndices: Array(0..<24)
     )
 
+    /// High security configuration for production use (~128-bit security)
+    /// - numQueries: 30 (≈2^-120+ soundness error)
+    /// - logBlowup: 2 (4x LDE extension for proper security margin)
+    /// - provingColumnCount: 32 (good balance of speed and security)
+    ///
+    /// Security analysis:
+    /// - Each query against M31 field gives ~31 bits per round
+    /// - 16 rounds × 30 queries ≈ 2^-120+ security
+    /// - Total proof verification time: ~5-10s (vs ~1s for ultraFast)
+    public static let highSecurity = BatchProverConfig(
+        batchSize: 150,
+        useGPU: true,
+        logTraceLength: 8,
+        numQueries: 30,        // 30 queries for ~128-bit security
+        logBlowup: 2,          // 4x blowup for proper LDE
+        useUnifiedProof: true,
+        provingColumnCount: 32,
+        criticalColumnIndices: Array(0..<32)
+    )
+
     /// Non-unified batch proving using GPU multi-stream per-transaction proving.
     ///
     /// This mode proves each transaction separately with GPU optimization but WITHOUT

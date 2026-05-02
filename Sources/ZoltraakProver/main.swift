@@ -94,6 +94,9 @@ case "real-block-unified":
     case "fast", "ultra":
         print("Using ultra-fast compression (16 columns)")
         compressionConfig = .ultraFast
+    case "secure", "highsecurity", "high-security":
+        print("Using high-security compression (32 columns, 30 queries, ~128-bit security)")
+        compressionConfig = .highSecurity
     case "none", "full":
         print("Using full columns (180 columns)")
         compressionConfig = .unifiedBlock  // Will be modified below

@@ -12,6 +12,8 @@ public enum ProvingMode: Sendable {
     case nonUnified
     /// Pipeline-based proving with parallel execution
     case pipeline
+    /// High-security mode with 30 queries and logBlowup=2 for ~128-bit security
+    case highSecurity
 }
 
 /// Run live proving mode against Ethereum mainnet
@@ -79,6 +81,7 @@ public func runLiveProvingMode(
 
     // Select batch prover config based on mode
     // Note: .unified uses ultraFast for realtime performance (16 columns, logTrace=6)
+    // For high-security, use highSecurity config (30 queries, logBlowup=2, 32 columns)
     let batchConfig: BatchProverConfig
     switch mode {
     case .unified:
@@ -87,6 +90,8 @@ public func runLiveProvingMode(
         batchConfig = .nonUnified
     case .pipeline:
         batchConfig = .highThroughput
+    case .highSecurity:
+        batchConfig = .highSecurity  // 30 queries, logBlowup=2, 32 columns for ~128-bit security
     }
 
     // Create prover once and reuse to avoid GPU resource creation/destruction crashes
@@ -307,6 +312,7 @@ public func runContinuousLiveProving(
 
     // Select batch prover config based on mode
     // Note: .unified uses ultraFast for realtime performance (16 columns, logTrace=6)
+    // For high-security, use highSecurity config (30 queries, logBlowup=2, 32 columns)
     let batchConfig: BatchProverConfig
     switch mode {
     case .unified:
@@ -315,6 +321,8 @@ public func runContinuousLiveProving(
         batchConfig = .nonUnified
     case .pipeline:
         batchConfig = .highThroughput
+    case .highSecurity:
+        batchConfig = .highSecurity  // 30 queries, logBlowup=2, 32 columns for ~128-bit security
     }
 
     let endpoints = [
@@ -543,6 +551,8 @@ private func modeDescription(_ mode: ProvingMode) -> String {
         return "Non-Unified (GPU multi-stream, per-tx proofs)"
     case .pipeline:
         return "Pipeline (parallel execution + proving)"
+    case .highSecurity:
+        return "High Security (~128-bit, 30 queries, logBlowup=2)"
     }
 }
 
