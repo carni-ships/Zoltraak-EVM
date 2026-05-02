@@ -406,9 +406,35 @@ public func runContinuousLiveProving(
         let animation = ProvingAnimation(message: "Proving block #\(nextBlockToProve)...")
         animation.start()
 
+        // Update animation with transaction count for progress bar
+        if blockData.txCount > 0 {
+            animation.updateMessage("Proving block #\(nextBlockToProve) (\(blockData.txCount) txns)")
+        }
+
+        // Progress tracking thread
+        let proofStartTime = CFAbsoluteTimeGetCurrent()
+        let estimatedTotalMs = Double(blockData.txCount) * 33.0  // ~33ms per txn in ultra mode
+        var progressThread: Thread?
+        let animationRef = animation
+        let txCount = blockData.txCount
+
+        progressThread = Thread {
+            while !Thread.current.isCancelled {
+                let elapsedMs = (CFAbsoluteTimeGetCurrent() - proofStartTime) * 1000
+                let progress = min(0.95, elapsedMs / estimatedTotalMs)
+                animationRef.updateProgress(progress, txnCount: Int(Double(txCount) * progress), total: txCount)
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+        }
+        progressThread?.start()
+
         do {
             let evmTransactions = blockData.toEVMTransactions()
             let proof = try batchProver.proveBatch(transactions: evmTransactions, quiet: quiet)
+
+            // Stop progress thread
+            progressThread?.cancel()
+            progressThread = nil
 
             // Restore stdout/stderr before printing results
             if quiet && savedStdoutFd >= 0 {

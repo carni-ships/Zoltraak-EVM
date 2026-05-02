@@ -49,6 +49,18 @@ public final class ProvingAnimation {
         message = newMessage
     }
 
+    /// Update the progress percentage and redraw the progress bar
+    public func updateProgress(_ percent: Double, txnCount: Int? = nil, total: Int? = nil) {
+        let bar = ProgressBar.draw(percent: percent)
+        var display = "\r├[\u{001B}[32m\(bar)\u{001B}[0m] "
+        if let tx = txnCount, let tot = total {
+            display += "\(tx)/\(tot) txns "
+        }
+        display += "\(String(format: "%.0f", percent * 100))% - \(message)"
+        print(display, terminator: "")
+        fflush(stdout)
+    }
+
     public func stop(success: Bool, finalMessage: String? = nil) {
         timer?.invalidate()
         timer = nil
@@ -70,7 +82,7 @@ public final class ProvingAnimation {
         completed = true
 
         let bar = ProgressBar.draw(percent: percent)
-        print("\r┌\(bar)┐ \(finalMessage)")
+        print("\r└[\u{001B}[32m\(bar)\u{001B}[0m] \(finalMessage)            ")
     }
 }
 
