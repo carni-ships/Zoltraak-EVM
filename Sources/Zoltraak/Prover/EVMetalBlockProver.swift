@@ -967,11 +967,10 @@ public final class ZoltraakBlockProver {
         //   Phase 4 (LDE):        [====LDE====]
         //   Phase 5 (Commit):              [===COMMIT===]
         //   Phase 6 (Constraint):                   [====CONSTRAINT====]
-        //   Phase 7 (FRI):                          [=FRI=]
+        //   Phase 7 (FRI):                                     [=FRI=]
         //
-        // With pipelining (estimated):
-        //   Total ≈ max(lde, commit) + max(constraint, fri)
-        //   ≈ max(400, 1000) + max(65000, 4) ≈ 1000 + 65000 ≈ 66000ms (vs 67454ms sequential)
+        // Optimized pipeline (async):
+        //   LDE → Commit → [Constraint || FRI] (overlap)
         // ============================================================
 
         // Phase 4: LDE (Low-Degree Extension)
@@ -997,22 +996,21 @@ public final class ZoltraakBlockProver {
         let treeBuffer = commitResult.treeBuffer
         let treeNumLeaves = commitResult.numLeaves
 
-        // Phase 6: Constraint evaluation with correct challenges
+        // Phase 6: Constraint evaluation (start async)
         let constraintStart = CFAbsoluteTimeGetCurrent()
         print("[BlockProver] Starting constraint evaluation...")
         fflush(stdout)
 
         let finalChallenges = generateChallenges(commitments: commitments)
-        let constraints = try air.evaluateConstraints(
-            trace: traceLDEs,
-            challenges: finalChallenges
-        )
-        let constraintMs = (CFAbsoluteTimeGetCurrent() - constraintStart) * 1000
-        print("[BlockProver] Constraint time: \(String(format: "%.1f", constraintMs))ms")
-        fflush(stdout)
 
-        // Phase 7: FRI proof using GPU Circle STARK
-        print("[BlockProver] Starting FRI phase...")
+        // Async constraint evaluation - runs in parallel with FRI
+        let constraintTask = Task {
+            try air.evaluateConstraints(trace: traceLDEs, challenges: finalChallenges)
+        }
+
+        // Start FRI phase in parallel while constraints are being evaluated
+        // (FRI only needs commit phase output, not constraints)
+        print("[BlockProver] Starting FRI phase (async)...")
         print("[BlockProver] traceLDEs count: \(traceLDEs.count)")
         fflush(stdout)
 
@@ -1020,10 +1018,6 @@ public final class ZoltraakBlockProver {
         var starkProofData: Data
         var friMs: Double = 0
 
-        // Check if we should use GPU prover
-        // GPU prover: use GPU Circle STARK when GPU is available
-        // Lowered threshold from 65536 to 16384 to work with logBlowup=1 configurations
-        // (ultraFast mode uses logBlowup=1 which gives evaluationDomain=32768 for 256 transactions)
         let compositionSize = traceLDEs.isEmpty ? 0 : traceLDEs[0].count
         let gpuAvailable = gpuProver?.gpuAvailable ?? false
         let useGPUProver = gpuAvailable && compositionSize >= 16384
@@ -1049,6 +1043,7 @@ public final class ZoltraakBlockProver {
                 starkProofData = Data(starkProof.serialize())
                 friMs = (CFAbsoluteTimeGetCurrent() - friStart) * 1000
             }
+            print("[BlockProver] FRI time: \(String(format: "%.1f", friMs))ms (async)")
         } else {
             // CPU prover - use the trace from air if available
             print("[BlockProver] Using CPU Circle STARK prover")
@@ -1060,8 +1055,18 @@ public final class ZoltraakBlockProver {
             fflush(stdout)
             starkProofData = Data(starkProof.serialize())
             friMs = (CFAbsoluteTimeGetCurrent() - friStart) * 1000
+            print("[BlockProver] FRI time: \(String(format: "%.1f", friMs))ms")
         }
-        print("[BlockProver] FRI time: \(String(format: "%.1f", friMs))ms")
+
+        // Wait for constraint evaluation to complete and measure total constraint time
+        let constraintValues: [M31]
+        do {
+            constraintValues = try await constraintTask.value
+        } catch {
+            throw BlockProverError.constraintEvaluationFailed(error.localizedDescription)
+        }
+        let constraintMs = (CFAbsoluteTimeGetCurrent() - constraintStart) * 1000
+        print("[BlockProver] Constraint time: \(String(format: "%.1f", constraintMs))ms (async)")
 
         let totalMs = (CFAbsoluteTimeGetCurrent() - totalStartTime) * 1000
         print("[BlockProver] Total proving time: \(String(format: "%.1f", totalMs))ms")
@@ -1669,7 +1674,7 @@ public enum BlockProverError: Error, Sendable {
     case tooManyTransactions(requested: Int, max: Int)
     case noExecutionResults
     case traceConversionFailed
-    case constraintEvaluationFailed
+    case constraintEvaluationFailed(String)
     case proofGenerationFailed
     case verificationFailed
     case commitmentFailed
