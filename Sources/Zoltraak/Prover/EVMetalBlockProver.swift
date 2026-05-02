@@ -896,24 +896,25 @@ public final class ZoltraakBlockProver {
         let failedCount = txResults.count - successfulResults.count
 
         if failedCount > 0 {
-            print("[BlockProver] \(failedCount) transactions failed execution, proving \(successfulResults.count) successful ones")
-            print("[BlockProver] Note: Real Ethereum blocks contain mix of valid/invalid/unsupported txs")
+            print("[BlockProver] Proving \(successfulResults.count) successful + \(failedCount) reverted transactions")
         }
 
-        // If all transactions failed, use synthetic minimal bytecode as fallback
+        // Include ALL transactions (both successful and reverted) for full block coverage
+        // Reverted transactions still affect state (gas consumed, nonce incremented)
         let executionResults: [EVMExecutionResult]
-        if successfulResults.isEmpty {
-            print("[BlockProver] WARNING: All transactions failed, using fallback synthetic execution")
+        if successfulResults.isEmpty && failedCount == 0 {
+            print("[BlockProver] WARNING: No transactions to prove, using fallback synthetic execution")
             let fallbackCode: [UInt8] = [0x60, 0x01, 0x60, 0x02, 0x01, 0x00]  // PUSH1 1, PUSH1 2, ADD, STOP
             let fallbackEngine = EVMExecutionEngine()
             let fallbackResult = try fallbackEngine.execute(code: fallbackCode, gasLimit: 1_000_000)
             executionResults = [fallbackResult]
         } else {
-            executionResults = successfulResults.compactMap { $0.executionResult }
+            // Include all transactions (both successful and reverted)
+            executionResults = txResults.compactMap { $0.executionResult }
         }
 
         let executionMs = (CFAbsoluteTimeGetCurrent() - executionStart) * 1000
-        print("[BlockProver] Execution: \(String(format: "%.1f", executionMs))ms (\(transactions.count) txs, \(executionWorkers) cores)")
+        print("[BlockProver] Execution: \(String(format: "%.1f", executionMs))ms (\(txResults.count) txs, \(executionWorkers) cores)")
 
         // Phase 2: Build unified block trace
         let traceStart = CFAbsoluteTimeGetCurrent()
