@@ -997,22 +997,10 @@ public final class ZoltraakBlockProver {
         let treeBuffer = commitResult.treeBuffer
         let treeNumLeaves = commitResult.numLeaves
 
-        // Phase 6: Constraint evaluation (start async)
-        let constraintStart = CFAbsoluteTimeGetCurrent()
-        print("[BlockProver] Starting constraint evaluation...")
-        fflush(stdout)
-
-        let finalChallenges = generateChallenges(commitments: commitments)
-
-        // Async constraint evaluation - runs in parallel with FRI
-        let constraintTask = Task {
-            try air.evaluateConstraints(trace: traceLDEs, challenges: finalChallenges)
-        }
-
-        // Start FRI phase in parallel while constraints are being evaluated
-        // (FRI only needs commit phase output, not constraints)
-        print("[BlockProver] Starting FRI phase (async)...")
-        print("[BlockProver] traceLDEs count: \(traceLDEs.count)")
+        // Phase 6: FRI/Constraint - GPU prover handles constraints internally
+        // NOTE: constraintTask below was redundant - GPU prover re-evaluates constraints
+        // anyway via evaluateConstraintsWithSubset. Removed to save ~200ms.
+        print("[BlockProver] Starting FRI/constraint phase...")
         fflush(stdout)
 
         let friStart = CFAbsoluteTimeGetCurrent()
@@ -1059,15 +1047,8 @@ public final class ZoltraakBlockProver {
             print("[BlockProver] FRI time: \(String(format: "%.1f", friMs))ms")
         }
 
-        // Wait for constraint evaluation to complete and measure total constraint time
-        let constraintValues: [M31]
-        do {
-            constraintValues = try await constraintTask.value
-        } catch {
-            throw BlockProverError.constraintEvaluationFailed(error.localizedDescription)
-        }
-        let constraintMs = (CFAbsoluteTimeGetCurrent() - constraintStart) * 1000
-        print("[BlockProver] Constraint time: \(String(format: "%.1f", constraintMs))ms (async)")
+        // Constraint time is included in GPU prover's FRI phase
+        let constraintMs = gpuProver != nil ? 0.0 : 0.0  // Not separately tracked for GPU path
 
         let totalMs = (CFAbsoluteTimeGetCurrent() - totalStartTime) * 1000
         print("[BlockProver] Total proving time: \(String(format: "%.1f", totalMs))ms")
