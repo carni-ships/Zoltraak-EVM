@@ -17,8 +17,8 @@ public enum ProvingMode: Sendable {
 /// Run live proving mode against Ethereum mainnet
 public func runLiveProvingMode(
     blockCount: Int,
-    quiet: Bool = false,
-    mode: ProvingMode = .nonUnified
+    quiet: Bool = true,
+    mode: ProvingMode = .unified
 ) {
     // Note: Header is printed in main.swift before calling this function
     if !quiet {
@@ -292,8 +292,8 @@ public func runLiveProvingMode(
 /// Run continuous live proving against Ethereum mainnet
 public func runContinuousLiveProving(
     blockLimit: Int,
-    quiet: Bool = false,
-    mode: ProvingMode = .nonUnified
+    quiet: Bool = true,
+    mode: ProvingMode = .unified
 ) {
     // Note: Header is printed in main.swift before calling this function
     if !quiet {
@@ -389,22 +389,19 @@ public func runContinuousLiveProving(
 
         let proveStart = CFAbsoluteTimeGetCurrent()
 
-        // Suppress stdout/stderr before proving in quiet mode to avoid verbose logs
-        var savedStdoutFd: Int32 = -1
+        // In quiet mode, suppress stderr only (verbose logs) but keep stdout for progress bar
         var savedStderrFd: Int32 = -1
         if quiet {
-            fflush(stdout)
             fflush(stderr)
-            savedStdoutFd = Darwin.dup(STDOUT_FILENO)
             savedStderrFd = Darwin.dup(STDERR_FILENO)
-            // Redirect both stdout and stderr to /dev/null
+            // Redirect stderr to /dev/null but keep stdout for progress bar
             let devNull = Darwin.fopen("/dev/null", "w")
-            Darwin.dup2(fileno(devNull), STDOUT_FILENO)
             Darwin.dup2(fileno(devNull), STDERR_FILENO)
         }
 
         let animation = ProvingAnimation(message: "Proving block #\(nextBlockToProve)...")
         animation.start()
+        fflush(stdout)
 
         // Update animation with transaction count for progress bar
         if blockData.txCount > 0 {
@@ -436,13 +433,10 @@ public func runContinuousLiveProving(
             progressThread?.cancel()
             progressThread = nil
 
-            // Restore stdout/stderr before printing results
-            if quiet && savedStdoutFd >= 0 {
-                fflush(stdout)
+            // Restore stderr before printing results
+            if quiet && savedStderrFd >= 0 {
                 fflush(stderr)
-                Darwin.dup2(savedStdoutFd, STDOUT_FILENO)
                 Darwin.dup2(savedStderrFd, STDERR_FILENO)
-                Darwin.close(savedStdoutFd)
                 Darwin.close(savedStderrFd)
             }
 
@@ -507,13 +501,10 @@ public func runContinuousLiveProving(
             }
 
         } catch {
-            // Restore stdout/stderr before printing error
-            if quiet && savedStdoutFd >= 0 {
-                fflush(stdout)
+            // Restore stderr before printing error
+            if quiet && savedStderrFd >= 0 {
                 fflush(stderr)
-                Darwin.dup2(savedStdoutFd, STDOUT_FILENO)
                 Darwin.dup2(savedStderrFd, STDERR_FILENO)
-                Darwin.close(savedStdoutFd)
                 Darwin.close(savedStderrFd)
             }
             animation.stop(success: false, finalMessage: "Block #\(nextBlockToProve) failed")

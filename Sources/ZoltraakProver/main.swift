@@ -213,13 +213,13 @@ case "compression-tests":
 case "eth-live":
     // Live Ethereum proving mode
     let blockCount = args.count > 2 ? Int(args[2]) ?? 1 : 1
-    let quietMode = args.contains("-q") || args.contains("--quiet")
-    runLiveProvingMode(blockCount: blockCount, quiet: quietMode)
+    let quietMode = !args.contains("-v") && !args.contains("--verbose")  // Default quiet
+    runLiveProvingMode(blockCount: blockCount, quiet: quietMode, mode: .unified)
 
 case "eth-live-cont":
     // Continuous live proving - run forever (default: unified mode for speed)
     let blockLimit = args.count > 2 ? Int(args[2]) ?? 0 : 0  // 0 = unlimited
-    let quietMode = args.contains("-q") || args.contains("--quiet")
+    let quietMode = !args.contains("-v") && !args.contains("--verbose")  // Default quiet
     runContinuousLiveProving(blockLimit: blockLimit, quiet: quietMode, mode: .unified)
 
 default:
