@@ -1303,12 +1303,13 @@ public struct ProverTests {
         // Conditional JUMPI with true condition
         do {
             let code: [UInt8] = [
-                0x60, 0x06,  // PUSH1 6 (target)
+                0x60, 0x07,  // PUSH1 7 (target = JUMPDEST position)
                 0x60, 0x01,  // PUSH1 1 (condition = true)
                 0x57,        // JUMPI
                 0x00,        // STOP (not executed)
                 0x00,        // STOP (not executed)
-                0x5B,        // JUMPDEST at position 5
+                0x5B,        // JUMPDEST at position 7
+                0x00,        // STOP
                 0x00         // STOP
             ]
             let result = try engine.execute(code: code, gasLimit: 100000)
