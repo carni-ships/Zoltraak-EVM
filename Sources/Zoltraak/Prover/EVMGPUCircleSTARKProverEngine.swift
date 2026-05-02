@@ -393,6 +393,37 @@ public final class EVMGPUCircleSTARKProverEngine {
             provingTraceLDEs = traceLDEs
         }
 
+        // Use precomputed tree buffer if available to skip GPU tree rebuilding
+        // This saves ~450ms by using trees already built in BlockProver
+        if let treeBuffer = precomputedTreeBuffer, treeBuffer.length > 0, !provingTraceLDEs.isEmpty {
+            let evalLen = provingTraceLDEs[0].count
+            print("[GPU Prover] commitTraceColumns: using precomputed tree buffer (\(treeBuffer.length) bytes)")
+
+            // Extract roots from the precomputed buffer (first node of each tree)
+            // Buffer layout: tree-first with treeSize = 2*numLeaves-1 nodes per tree
+            let treeNodeCount = 2 * evalLen - 1
+            let nodeSize = 8
+            let bytesPerTree = treeNodeCount * nodeSize
+
+            var roots = [M31Digest]()
+            for i in 0..<provingTraceLDEs.count {
+                let treeOffset = i * bytesPerTree
+                let ptr = treeBuffer.contents().advanced(by: treeOffset).bindMemory(to: UInt32.self, capacity: nodeSize)
+                var rootVals = [M31]()
+                for j in 0..<nodeSize {
+                    rootVals.append(M31(v: ptr[j]))
+                }
+                roots.append(M31Digest(values: rootVals))
+            }
+
+            // Store tree buffer for query phase
+            self.traceTreeBuffers = [treeBuffer]
+            self.traceTreeNumLeaves = evalLen
+
+            let commitTime = CFAbsoluteTimeGetCurrent() - commitT0
+            return (roots, [], commitTime)
+        }
+
         // Use precomputed commitments when available - no need to rebuild GPU trees
         // This saves ~800ms by skipping redundant GPU tree rebuilding
         // GPU proofs will fall back to CPU path since we don't have tree buffers
@@ -557,12 +588,13 @@ public final class EVMGPUCircleSTARKProverEngine {
         // Use GPU constraint engine when available - but only for reasonable sizes
         // GPU engine may hang for very large traces due to memory pressure
         // For column subset mode (16 cols), CPU parallel is faster than GPU upload overhead
+        // because padTraceToFullColumns requires transferring all 180 columns (~95MB)
         if let gpuConstraint = gpuConstraintEngine {
             let evalLen = traceLDEs.first?.count ?? 0
             let numCols = min(columnIndices.count, 32)  // Only FRI-proving columns
             let canUseGPU = gpuConstraint.canHandle(traceLength: evalLen, numColumns: numCols)
             let useColumnSubset = columnIndices.count < 180
-            // CPU is faster for subset mode - 16 cols × 32768 rows uploads ~47MB which dominates
+            // CPU is faster for subset mode - 16 cols × 131K rows uploads ~95MB (pad to 180) which dominates
             // CPU parallel handles 16 cols efficiently with SIMD
             let shouldUseGPU = canUseGPU && !useColumnSubset
             print("[GPU Prover] evaluateConstraints: evalLen=\(evalLen), numCols=\(numCols), subset=\(useColumnSubset), canUseGPU=\(canUseGPU), shouldUseGPU=\(shouldUseGPU)")
