@@ -28,6 +28,10 @@ public final class ProvingAnimation {
     private var frameIndex = 0
     private var message: String
     private var completed: Bool = false
+    private var progressPercent: Double = 0
+    private var txnCount: Int = 0
+    private var txnTotal: Int = 0
+    private var showingProgress: Bool = false
 
     public init(message: String) {
         self.message = message
@@ -39,8 +43,14 @@ public final class ProvingAnimation {
 
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             guard let self = self, !self.completed else { return }
-            self.frameIndex = (self.frameIndex + 1) % ProvingSpinner.frames.count
-            print("\r\(ProvingSpinner.frames[self.frameIndex]) \(self.message)", terminator: "")
+            if self.showingProgress {
+                // Redraw progress bar in same position
+                let bar = ProgressBar.draw(percent: self.progressPercent)
+                print("\r├[\u{001B}[32m\(bar)\u{001B}[0m] \(self.txnCount)/\(self.txnTotal) txns \(String(format: "%.0f", self.progressPercent * 100))% - \(self.message)", terminator: "")
+            } else {
+                self.frameIndex = (self.frameIndex + 1) % ProvingSpinner.frames.count
+                print("\r\(ProvingSpinner.frames[self.frameIndex]) \(self.message)", terminator: "")
+            }
             fflush(stdout)
         }
     }
@@ -50,14 +60,26 @@ public final class ProvingAnimation {
     }
 
     /// Update the progress percentage and redraw the progress bar
+    /// Uses CR (carriage return) to overwrite the same line
     public func updateProgress(_ percent: Double, txnCount: Int? = nil, total: Int? = nil) {
-        let bar = ProgressBar.draw(percent: percent)
-        var display = "\r├[\u{001B}[32m\(bar)\u{001B}[0m] "
+        self.progressPercent = percent
         if let tx = txnCount, let tot = total {
-            display += "\(tx)/\(tot) txns "
+            self.txnCount = tx
+            self.txnTotal = tot
+            self.showingProgress = true
         }
-        display += "\(String(format: "%.0f", percent * 100))% - \(message)"
-        print(display, terminator: "")
+
+        // Build progress string
+        let bar = ProgressBar.draw(percent: percent)
+        var display: String
+        if let tx = txnCount, let tot = total {
+            display = "├[\(bar)] \(tx)/\(tot) txns \(String(format: "%.0f", percent * 100))% - \(message)"
+        } else {
+            display = "├[\(bar)] \(String(format: "%.0f", percent * 100))% - \(message)"
+        }
+
+        // CR + clear line + redraw to ensure clean overwrite
+        print("\r\u{001B}[2K\r\(display)", terminator: "")
         fflush(stdout)
     }
 
@@ -69,10 +91,11 @@ public final class ProvingAnimation {
         let symbol = success ? "✓" : "✗"
         let color = success ? "32" : "31"  // green or red
 
+        // Clear line before printing final result
         if let final = finalMessage {
-            print("\r\u{001B}[\(color)m\(symbol)\u{001B}[0m \(final)")
+            print("\r\u{001B}[2K\r\u{001B}[\(color)m\(symbol)\u{001B}[0m \(final)")
         } else {
-            print("\r\u{001B}[\(color)m\(symbol)\u{001B}[0m \(message)")
+            print("\r\u{001B}[2K\r\u{001B}[\(color)m\(symbol)\u{001B}[0m \(message)")
         }
     }
 
