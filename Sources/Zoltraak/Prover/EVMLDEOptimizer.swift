@@ -232,24 +232,28 @@ public final class EVMLDEOptimizer {
             bufs = createBuffers(numColumns: numColumns, evalLen: evalLen, sz: sz)
         }
 
-        // Copy trace data to GPU (async copy to overlap with computation)
-        // Use separate stream for copy if available
-        let copyQueueIdx = config.useMultiStream ? (commandQueues.count - 1) : 0
-        let copyQueue = commandQueues[copyQueueIdx]
-        if let cbCopy = copyQueue.makeCommandBuffer() {
-            for colIdx in 0..<numColumns {
-                let ptr = bufs[colIdx].contents().bindMemory(to: UInt32.self, capacity: evalLen)
-                let actualLen = min(traceLen, trace[colIdx].count)
-                for i in 0..<actualLen {
-                    ptr[i] = trace[colIdx][i].v
-                }
-                // Only zero-pad to traceLen (GPU will handle extension to evalLen)
-                for i in actualLen..<traceLen {
-                    ptr[i] = 0
+        // Copy trace data to GPU using memcpy for bulk transfer (much faster than element-by-element)
+        for colIdx in 0..<numColumns {
+            let ptr = bufs[colIdx].contents().bindMemory(to: UInt32.self, capacity: evalLen)
+            let actualLen = min(traceLen, trace[colIdx].count)
+
+            // Fast memcpy for data portion using raw pointer
+            if actualLen > 0 {
+                let srcArray = trace[colIdx]
+                srcArray.withUnsafeBytes { srcBytes in
+                    memcpy(ptr, srcBytes.baseAddress!, actualLen * MemoryLayout<UInt32>.stride)
                 }
             }
-            cbCopy.commit()
-            cbCopy.waitUntilCompleted()  // Need sync for INTT to use the data
+
+            // Zero the remaining portion (traceLen - actualLen)
+            if actualLen < traceLen {
+                memset(ptr + actualLen, 0, (traceLen - actualLen) * MemoryLayout<UInt32>.stride)
+            }
+
+            // Clear padding to evalLen (GPU will handle extension via duplicateLDE)
+            if traceLen < evalLen {
+                memset(ptr + traceLen, 0, (evalLen - traceLen) * MemoryLayout<UInt32>.stride)
+            }
         }
 
         copyMs = (CFAbsoluteTimeGetCurrent() - copyT0) * 1000
