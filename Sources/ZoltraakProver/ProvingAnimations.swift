@@ -38,20 +38,21 @@ public final class ProvingAnimation {
     }
 
     public func start() {
-        print("\(ProvingSpinner.frames[0]) \(message)", terminator: "")
-        fflush(stdout)
+        // Print initial spinner to stderr (not redirected in quiet mode)
+        fputs("\(ProvingSpinner.frames[0]) \(message)", stderr)
+        fflush(stderr)
 
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             guard let self = self, !self.completed else { return }
             if self.showingProgress {
-                // Redraw progress bar in same position
+                // Redraw progress bar in same position on stderr
                 let bar = ProgressBar.draw(percent: self.progressPercent)
-                print("\r├[\u{001B}[32m\(bar)\u{001B}[0m] \(self.txnCount)/\(self.txnTotal) txns \(String(format: "%.0f", self.progressPercent * 100))% - \(self.message)", terminator: "")
+                fputs("\r├[\(bar)] \(self.txnCount)/\(self.txnTotal) txns \(String(format: "%.0f", self.progressPercent * 100))% - \(self.message)", stderr)
             } else {
                 self.frameIndex = (self.frameIndex + 1) % ProvingSpinner.frames.count
-                print("\r\(ProvingSpinner.frames[self.frameIndex]) \(self.message)", terminator: "")
+                fputs("\r\(ProvingSpinner.frames[self.frameIndex]) \(self.message)", stderr)
             }
-            fflush(stdout)
+            fflush(stderr)
         }
     }
 
@@ -78,9 +79,9 @@ public final class ProvingAnimation {
             display = "├[\(bar)] \(String(format: "%.0f", percent * 100))% - \(message)"
         }
 
-        // CR + clear line + redraw to ensure clean overwrite
-        print("\r\u{001B}[2K\r\(display)", terminator: "")
-        fflush(stdout)
+        // CR + clear line + redraw to stderr (stays in place even when stdout is redirected)
+        fputs("\r\u{001B}[2K\r\(display)", stderr)
+        fflush(stderr)
     }
 
     public func stop(success: Bool, finalMessage: String? = nil) {
@@ -91,12 +92,13 @@ public final class ProvingAnimation {
         let symbol = success ? "✓" : "✗"
         let color = success ? "32" : "31"  // green or red
 
-        // Clear line before printing final result
+        // Clear line before printing final result to stderr
         if let final = finalMessage {
-            print("\r\u{001B}[2K\r\u{001B}[\(color)m\(symbol)\u{001B}[0m \(final)")
+            fputs("\r\u{001B}[2K\r\u{001B}[\(color)m\(symbol)\u{001B}[0m \(final)\n", stderr)
         } else {
-            print("\r\u{001B}[2K\r\u{001B}[\(color)m\(symbol)\u{001B}[0m \(message)")
+            fputs("\r\u{001B}[2K\r\u{001B}[\(color)m\(symbol)\u{001B}[0m \(message)\n", stderr)
         }
+        fflush(stderr)
     }
 
     public func stopWithProgress(finalMessage: String, percent: Double) {

@@ -389,15 +389,9 @@ public func runContinuousLiveProving(
 
         let proveStart = CFAbsoluteTimeGetCurrent()
 
-        // In quiet mode, suppress stderr only (verbose logs) but keep stdout for progress bar
-        var savedStderrFd: Int32 = -1
-        if quiet {
-            fflush(stderr)
-            savedStderrFd = Darwin.dup(STDERR_FILENO)
-            // Redirect stderr to /dev/null but keep stdout for progress bar
-            let devNull = Darwin.fopen("/dev/null", "w")
-            Darwin.dup2(fileno(devNull), STDERR_FILENO)
-        }
+        // Progress bar writes to stderr, so we don't redirect it
+        // In quiet mode, verbose logs (which go to stdout) are suppressed via print filter
+        // but stderr remains visible for the progress bar
 
         let animation = ProvingAnimation(message: "Proving block #\(nextBlockToProve)...")
         animation.start()
@@ -432,13 +426,6 @@ public func runContinuousLiveProving(
             // Stop progress thread
             progressThread?.cancel()
             progressThread = nil
-
-            // Restore stderr before printing results
-            if quiet && savedStderrFd >= 0 {
-                fflush(stderr)
-                Darwin.dup2(savedStderrFd, STDERR_FILENO)
-                Darwin.close(savedStderrFd)
-            }
 
             animation.stop(success: true, finalMessage: "Block #\(nextBlockToProve) verified")
 
@@ -501,12 +488,6 @@ public func runContinuousLiveProving(
             }
 
         } catch {
-            // Restore stderr before printing error
-            if quiet && savedStderrFd >= 0 {
-                fflush(stderr)
-                Darwin.dup2(savedStderrFd, STDERR_FILENO)
-                Darwin.close(savedStderrFd)
-            }
             animation.stop(success: false, finalMessage: "Block #\(nextBlockToProve) failed")
             print("Block #\(nextBlockToProve): FAILED - \(error)")
             totalFailed += 1
