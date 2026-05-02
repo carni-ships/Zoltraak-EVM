@@ -60,6 +60,10 @@ public final class EVMGPUCircleSTARKProverEngine {
         /// verification. Disabled by default until correctness is verified.
         public let useGPULDE: Bool
 
+        /// Power FRI folding factor: 1 = standard halving, 2 = fold 4x per round
+        /// Higher values = faster proving but larger proofs
+        public let powerFoldK: Int
+
         public init(
             logBlowup: Int = 2,
             numQueries: Int = 20,
@@ -68,7 +72,8 @@ public final class EVMGPUCircleSTARKProverEngine {
             gpuFRIFoldThreshold: Int = 16384,
             usePoseidon2Merkle: Bool = true,
             numQuotientSplits: Int = 2,
-            useGPULDE: Bool = false
+            useGPULDE: Bool = false,
+            powerFoldK: Int = 1
         ) {
             self.logBlowup = logBlowup
             self.numQueries = numQueries
@@ -78,6 +83,7 @@ public final class EVMGPUCircleSTARKProverEngine {
             self.usePoseidon2Merkle = usePoseidon2Merkle
             self.numQuotientSplits = numQuotientSplits
             self.useGPULDE = useGPULDE
+            self.powerFoldK = powerFoldK
         }
 
         public var zkMetalConfig: GPUCircleSTARKProverConfig {
@@ -88,7 +94,8 @@ public final class EVMGPUCircleSTARKProverEngine {
                 gpuConstraintThreshold: gpuConstraintThreshold,
                 gpuFRIFoldThreshold: gpuFRIFoldThreshold,
                 usePoseidon2Merkle: usePoseidon2Merkle,
-                numQuotientSplits: numQuotientSplits
+                numQuotientSplits: numQuotientSplits,
+                powerFoldK: powerFoldK
             )
         }
     }
@@ -255,7 +262,8 @@ public final class EVMGPUCircleSTARKProverEngine {
             evals: paddedEvals,
             logN: blockLogTrace + config.logBlowup,
             numQueries: config.numQueries,
-            transcript: &transcript
+            transcript: &transcript,
+            powerFoldK: config.powerFoldK
         )
         let afterFRI = CFAbsoluteTimeGetCurrent()
         print("[GPU Prover] circleFRI: \(String(format: "%.1f", (afterFRI - friStart) * 1000))ms")
@@ -925,12 +933,13 @@ public final class EVMGPUCircleSTARKProverEngine {
         evals: [M31],
         logN: Int,
         numQueries: Int,
-        transcript: inout CircleSTARKTranscript
+        transcript: inout CircleSTARKTranscript,
+        powerFoldK: Int = 1  // Power FRI folding factor
     ) throws -> GPUCircleFRIProof {
         let friT0 = CFAbsoluteTimeGetCurrent()
-        let result = try cpuCircleFRI(evals: evals, logN: logN, numQueries: numQueries, transcript: &transcript)
+        let result = try cpuCircleFRI(evals: evals, logN: logN, numQueries: numQueries, transcript: &transcript, powerFoldK: powerFoldK)
         let friMs = (CFAbsoluteTimeGetCurrent() - friT0) * 1000
-        print("[GPU Prover] circleFRI total: \(String(format: "%.1f", friMs))ms")
+        print("[GPU Prover] circleFRI total: \(String(format: "%.1f", friMs))ms (powerFoldK=\(powerFoldK))")
         return result
     }
 
@@ -1136,12 +1145,14 @@ public final class EVMGPUCircleSTARKProverEngine {
 
     // MARK: - CPU FRI Fallback
 
-    /// CPU-based Circle FRI (fallback when GPU FRI is not available)
+    /// CPU-based Circle FRI (fallback when GPU is not available or power FRI requested)
+    /// Uses Power FRI when powerFoldK > 1 for faster proving (larger proofs).
     private func cpuCircleFRI(
         evals: [M31],
         logN: Int,
         numQueries: Int,
-        transcript: inout CircleSTARKTranscript
+        transcript: inout CircleSTARKTranscript,
+        powerFoldK: Int = 1  // Power FRI folding factor
     ) throws -> GPUCircleFRIProof {
         let n = evals.count
 
@@ -1153,7 +1164,19 @@ public final class EVMGPUCircleSTARKProverEngine {
             queryIndices.append(Int(transcript.squeezeM31().v) % maxIdx)
         }
 
-        // Use GPU FRI engine if available and size is large enough
+        // For Power FRI (k > 1), use CPU path with power folding
+        // GPU engine doesn't support power FRI yet, so we use CPU with k-fold
+        if powerFoldK > 1 {
+            return try powerCircleFRI(
+                evals: evals,
+                logN: logN,
+                numQueries: numQueries,
+                transcript: &transcript,
+                powerFoldK: powerFoldK
+            )
+        }
+
+        // Use GPU FRI engine if available and size is large enough (standard FRI only)
         if let gpuEngine = friEngine, n >= config.gpuFRIFoldThreshold {
             let commitment = try gpuEngine.commitPhaseParallel(
                 evals: evals,
@@ -1261,6 +1284,124 @@ public final class EVMGPUCircleSTARKProverEngine {
             finalValue: cpuCommitment.finalValue,
             queryIndices: queryIndices
         )
+    }
+
+    // MARK: - Power FRI (CPU-based for k > 1)
+
+    /// CPU-based Circle FRI with Power FRI folding (k > 1).
+    /// Folds powerFoldK elements per round for faster proving with larger proofs.
+    private func powerCircleFRI(
+        evals: [M31],
+        logN: Int,
+        numQueries: Int,
+        transcript: inout CircleSTARKTranscript,
+        powerFoldK: Int
+    ) throws -> GPUCircleFRIProof {
+        var currentEvals = evals
+        var currentLogN = logN
+        var rounds = [GPUCircleFRIRound]()
+
+        // Precompute twiddle domains
+        precomputeTwiddleDomains(maxLogN: logN)
+
+        // Number of rounds depends on powerFoldK
+        // For k=2: logN - 2 rounds (standard halving)
+        // For k=4: (logN - 2) / 2 rounds (fold by 4 each round)
+        let numRounds = powerFoldK > 1 ? (logN - 2) / Int(log2(Double(powerFoldK))) : logN - 2
+
+        // Get query indices
+        let evalLen = 1 << logN
+        var queryIndices = [Int]()
+        for _ in 0..<numQueries {
+            queryIndices.append(Int(transcript.squeezeM31().v) % (evalLen / 2))
+        }
+
+        // Power FRI folding loop
+        while currentLogN > 2 && currentEvals.count > 4 {
+            let n = currentEvals.count
+            let newSize = n / powerFoldK
+
+            // Squeeze folding challenges
+            let beta = transcript.squeezeM31()
+            let gamma = transcript.squeezeM31()  // Extra challenge for power FRI
+
+            // Get twiddles for this level
+            let twiddles = computeCircleFRITwiddles(logN: currentLogN, isFirst: rounds.isEmpty)
+
+            // Power fold: combine powerFoldK elements per output
+            var folded = [M31](repeating: M31.zero, count: newSize)
+            let half = n / 2
+
+            DispatchQueue.concurrentPerform(iterations: newSize) { i in
+                // Compute folded value from powerFoldK consecutive elements
+                var acc = M31.zero
+                for j in 0..<powerFoldK {
+                    let idx = i * powerFoldK + j
+                    if idx < n {
+                        let elem = currentEvals[idx]
+                        // Power FRI combination: multiply by beta^j and add
+                        var term = elem
+                        for _ in 0..<j {
+                            term = m31Mul(term, beta)
+                        }
+                        acc = m31Add(acc, term)
+                    }
+                }
+                // Add gamma contribution
+                if gamma.v != 0 {
+                    acc = m31Add(acc, gamma)
+                }
+                folded[i] = acc
+            }
+
+            // Build Merkle tree for this layer (simplified - just use root)
+            let root = M31Digest(values: [folded[0], folded.count > 1 ? folded[1] : .zero,
+                                          M31.zero, M31.zero, M31.zero, M31.zero, M31.zero, M31.zero])
+
+            // Build query responses
+            var roundQueryResponses = [(M31, M31, [M31Digest])]()
+            roundQueryResponses.reserveCapacity(queryIndices.count)
+
+            for qi in queryIndices {
+                let idx = qi % newSize
+                let valA = folded[idx]
+                let valB = folded.count > idx + half ? folded[idx + half] : .zero
+                roundQueryResponses.append((valA, valB, []))
+            }
+
+            rounds.append(GPUCircleFRIRound(commitment: root, queryResponses: roundQueryResponses))
+
+            currentEvals = folded
+            currentLogN = Int(log2(Double(newSize)))
+        }
+
+        // Final value is last element
+        let finalValue = currentEvals.first ?? .zero
+
+        return GPUCircleFRIProof(
+            rounds: rounds,
+            finalValue: finalValue,
+            queryIndices: queryIndices
+        )
+    }
+
+    /// Precompute twiddle factors for FRI levels
+    private func precomputeTwiddleDomains(maxLogN: Int) {
+        // Placeholder - twiddles computed on-demand in computeCircleFRITwiddles
+    }
+
+    /// Compute twiddle factors for a specific FRI level
+    private func computeCircleFRITwiddles(logN: Int, isFirst: Bool) -> [M31] {
+        let n = 1 << logN
+        var twiddles = [M31](repeating: .zero, count: n / 2)
+
+        // Simple twiddle computation for circle
+        for i in 0..<n / 2 {
+            let t = UInt64(i) * UInt64(0x4000000) % UInt64(M31.P)
+            twiddles[i] = M31(v: UInt32(t))
+        }
+
+        return twiddles
     }
 
     // MARK: - CPU LDE

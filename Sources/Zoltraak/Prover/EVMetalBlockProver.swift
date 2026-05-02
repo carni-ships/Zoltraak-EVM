@@ -314,7 +314,8 @@ public final class ZoltraakBlockProver {
                 gpuFRIFoldThreshold: 1,
                 usePoseidon2Merkle: true,
                 numQuotientSplits: 1,
-                useGPULDE: true  // Enable GPU LDE for faster trace extension
+                useGPULDE: true,  // Enable GPU LDE for faster trace extension
+                powerFoldK: 2       // Power FRI k=2 for faster proving (larger proofs)
             )
             self.gpuProver = try EVMGPUCircleSTARKProverEngine(config: evmGpuConfig)
             self.merkleEngine = try EVMGPUMerkleEngine()

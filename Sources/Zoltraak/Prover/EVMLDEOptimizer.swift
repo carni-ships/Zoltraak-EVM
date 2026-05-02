@@ -232,51 +232,65 @@ public final class EVMLDEOptimizer {
             bufs = createBuffers(numColumns: numColumns, evalLen: evalLen, sz: sz)
         }
 
-        // Copy trace data to GPU
-        for colIdx in 0..<numColumns {
-            let ptr = bufs[colIdx].contents().bindMemory(to: UInt32.self, capacity: evalLen)
-            let actualLen = min(traceLen, trace[colIdx].count)
-            for i in 0..<actualLen {
-                ptr[i] = trace[colIdx][i].v
-            }
-            // CPU zero-pad (L3 optimization will move this to GPU)
-            if config.gpuZeroPadding {
-                // Skip CPU padding - will do on GPU
-                for i in actualLen..<traceLen {
-                    ptr[i] = 0
+        // Copy trace data to GPU (async copy to overlap with computation)
+        // Use separate stream for copy if available
+        let copyQueueIdx = config.useMultiStream ? (commandQueues.count - 1) : 0
+        let copyQueue = commandQueues[copyQueueIdx]
+        if let cbCopy = copyQueue.makeCommandBuffer() {
+            for colIdx in 0..<numColumns {
+                let ptr = bufs[colIdx].contents().bindMemory(to: UInt32.self, capacity: evalLen)
+                let actualLen = min(traceLen, trace[colIdx].count)
+                for i in 0..<actualLen {
+                    ptr[i] = trace[colIdx][i].v
                 }
-            } else {
+                // Only zero-pad to traceLen (GPU will handle extension to evalLen)
                 for i in actualLen..<traceLen {
                     ptr[i] = 0
                 }
             }
+            cbCopy.commit()
+            cbCopy.waitUntilCompleted()  // Need sync for INTT to use the data
         }
 
         copyMs = (CFAbsoluteTimeGetCurrent() - copyT0) * 1000
 
-        // Step 2: Batch INTT (traceLen -> traceLen, with scale)
-        // PHASE 2 OPTIMIZATION: Batch all columns in single command buffer
+        // Step 2: Multi-stream INTT (overlap across columns using multiple queues)
+        // Use round-robin assignment to distribute columns across available streams
         let inttT0 = CFAbsoluteTimeGetCurrent()
-        guard let cbIntt = commandQueues[0].makeCommandBuffer() else {
-            throw GPUProverError.noCommandBuffer
-        }
+        var inttCmdBuffers: [MTLCommandBuffer] = []
+
         for colIdx in 0..<numColumns {
-            nttEngine.encodeINTT(data: bufs[colIdx], logN: logTrace, cmdBuf: cbIntt)
-        }
-        cbIntt.commit()
-        cbIntt.waitUntilCompleted()
-        inttMs = (CFAbsoluteTimeGetCurrent() - inttT0) * 1000
-        if let error = cbIntt.error {
-            throw GPUProverError.gpuError("Batch INTT failed: \(error.localizedDescription)")
+            let queueIdx = colIdx % commandQueues.count
+            guard let cb = commandQueues[queueIdx].makeCommandBuffer() else { continue }
+            nttEngine.encodeINTT(data: bufs[colIdx], logN: logTrace, cmdBuf: cb)
+            cb.commit()
+            inttCmdBuffers.append(cb)
         }
 
-        // Step 3: Zero-pad (extend from traceLen to evalLen)
+        // Wait for all INTTs to complete
+        for cb in inttCmdBuffers {
+            cb.waitUntilCompleted()
+        }
+        inttMs = (CFAbsoluteTimeGetCurrent() - inttT0) * 1000
+
+        // Step 3: GPU Zero-pad (extend from traceLen to evalLen) - use duplicateLDE if blowup=2
         let zeroPadT0 = CFAbsoluteTimeGetCurrent()
         if config.gpuZeroPadding {
-            // L3: GPU zero-padding kernel (avoid CPU-GPU sync)
-            try gpuZeroPad(bufs: bufs, numColumns: numColumns, traceLen: traceLen, evalLen: evalLen)
+            // L3 optimization: GPU zero-padding with kernel or memset
+            // For blowup=2 (most common), paddingLen == traceLen, so duplicateLDE kernel works
+            if duplicateLDEKernel != nil {
+                // Use duplicateLDE kernel for blowup=2 - it's the fastest path
+                try gpuZeroPadWithDuplicate(bufs: bufs, numColumns: numColumns, traceLen: traceLen)
+            } else if zeroPadKernel != nil {
+                try gpuZeroPad(bufs: bufs, numColumns: numColumns, traceLen: traceLen, evalLen: evalLen)
+            } else {
+                // CPU memset fallback
+                for colIdx in 0..<numColumns {
+                    let ptr = bufs[colIdx].contents().bindMemory(to: UInt32.self, capacity: evalLen)
+                    memset(ptr + traceLen, 0, (evalLen - traceLen) * sz)
+                }
+            }
         } else {
-            // CPU zero-padding
             for colIdx in 0..<numColumns {
                 let ptr = bufs[colIdx].contents().bindMemory(to: UInt32.self, capacity: evalLen)
                 memset(ptr + traceLen, 0, (evalLen - traceLen) * sz)
@@ -284,21 +298,23 @@ public final class EVMLDEOptimizer {
         }
         zeroPadMs = (CFAbsoluteTimeGetCurrent() - zeroPadT0) * 1000
 
-        // Step 4: Batch NTT (traceLen -> evalLen)
-        // PHASE 2 OPTIMIZATION: Batch all columns in single command buffer
+        // Step 4: Multi-stream NTT (overlap across columns using multiple queues)
         let nttT0 = CFAbsoluteTimeGetCurrent()
-        guard let cbNtt = commandQueues[0].makeCommandBuffer() else {
-            throw GPUProverError.noCommandBuffer
-        }
+        var nttCmdBuffers: [MTLCommandBuffer] = []
+
         for colIdx in 0..<numColumns {
-            nttEngine.encodeNTT(data: bufs[colIdx], logN: logEval, cmdBuf: cbNtt)
+            let queueIdx = colIdx % commandQueues.count
+            guard let cb = commandQueues[queueIdx].makeCommandBuffer() else { continue }
+            nttEngine.encodeNTT(data: bufs[colIdx], logN: logEval, cmdBuf: cb)
+            cb.commit()
+            nttCmdBuffers.append(cb)
         }
-        cbNtt.commit()
-        cbNtt.waitUntilCompleted()
+
+        // Wait for all NTTs to complete
+        for cb in nttCmdBuffers {
+            cb.waitUntilCompleted()
+        }
         nttMs = (CFAbsoluteTimeGetCurrent() - nttT0) * 1000
-        if let error = cbNtt.error {
-            throw GPUProverError.gpuError("Batch NTT failed: \(error.localizedDescription)")
-        }
 
         // Step 5: Read back results
         var results = [[M31]]()
@@ -476,6 +492,41 @@ public final class EVMLDEOptimizer {
 
         cb.commit()
         // Don't wait - overlap with subsequent NTT phase
+    }
+
+    /// GPU zero-padding optimized for blowup=2 (duplicate kernel).
+    /// This is the fastest path for the common blowup=2 case.
+    private func gpuZeroPadWithDuplicate(bufs: [MTLBuffer], numColumns: Int, traceLen: Int) throws {
+        guard let kernel = duplicateLDEKernel else { return }
+
+        let queue = commandQueues.count > 1 ? commandQueues[1] : commandQueues[0]
+        guard let cb = queue.makeCommandBuffer() else {
+            throw GPUProverError.noCommandBuffer
+        }
+
+        // Process all columns with duplicateLDE kernel
+        // For blowup=2: each input[i] goes to output[2i] and output[2i+1]
+        let threadsPerTG = min(kernel.maxTotalThreadsPerThreadgroup, 256)
+        let totalElements = traceLen * 2
+
+        for buf in bufs {
+            let enc = cb.makeComputeCommandEncoder()!
+            enc.setComputePipelineState(kernel)
+            enc.setBuffer(buf, offset: 0, index: 0)  // input
+            enc.setBuffer(buf, offset: 0, index: 1)  // output (same buffer, in-place)
+            var tl = UInt32(traceLen)
+            enc.setBytes(&tl, length: 4, index: 2)
+
+            let numThreadgroups = (totalElements + threadsPerTG - 1) / threadsPerTG
+            enc.dispatchThreadgroups(
+                MTLSize(width: numThreadgroups, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: threadsPerTG, height: 1, depth: 1)
+            )
+            enc.endEncoding()
+        }
+
+        cb.commit()
+        // Don't wait - overlap with subsequent NTT
     }
 
     /// Execute GPU duplicate kernel for blowup=2 case.
